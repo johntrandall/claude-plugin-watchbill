@@ -1,0 +1,1300 @@
+#!/usr/bin/env python3
+"""herdr-lifecycle — one name per session, lifecycle shown as a glyph on the tab.
+
+Three fields, three jobs:
+  address    Claude session name (claude -n). What SendMessage uses. Set at birth.
+  label      herdr tab label. What the human reads. Free to change; nothing addresses it.
+  lifecycle  one glyph at the FRONT of the tab label.
+
+A handoff receiver is named <base>-ho<N>; the origin keeps its own name and becomes
+the historian. The highest N in a chain owns the work.
+
+Subcommands
+  whoami                         this session: pane, tab, label, Claude name
+  siblings [--all] [--json]      sessions in this workspace (or all), with handoff chains
+  label <state> [--tab T] [--topic X] [--to NAME] [--reason R]
+                                 relabel a tab glyph-first. state: active waiting
+                                 handed-off review parked watching (👁, a parked builder
+                                 with a watch armed) human (?, stopped on the human;
+                                 --reason puts the class in parentheses, default
+                                 "decision").
+                                 Default tab: your own. Every relabel re-syncs the
+                                 workspace label: it starts with "? " while any of its
+                                 tabs shows ?, and loses it when none does.
+  next-name [NAME]               the receiver name for a handoff from NAME (default: you)
+  spawn <name> [--tab-label L] [--new-tab] [--cwd D] [--override-headroom] -- <claude args>
+                                 split (or new tab), start claude with herdr name ==
+                                 Claude name == <name>; gated by the configured
+                                 headroom_command when one is set
+  spawn --seat builder|steward|build|run|standing|advisor --subject S [--task T]
+        --model M [--effort E] [--pane] [--cwd D] [--agent A] [--resume SID] [--brief PATH]
+        [--tab-label L] [--workspace W] [--override-headroom] [-- <claude args>]
+                                 a watchbill seat: name and label from the seat, a new
+                                 tab by default (--pane to split), moved to its slot
+                                 (builder, steward, build, run, standing, advisor,
+                                 historians last). --model is required and a forbidden
+                                 model (configuration: forbidden_models) is refused. The
+                                 session gets WATCHBILL_SEAT (the seat kind),
+                                 WATCHBILL_SEAT_NAME, WATCHBILL_SYSTEM (its cwd) and, with
+                                 --brief, WATCHBILL_BRIEF; the plugin's session-start hook
+                                 primes it from them. Records a spawn row with the launcher of record
+                                 (default: you; --launched-by / --accountable keep a
+                                 restored seat's originals). --name overrides the built
+                                 name (restore uses it for -hoN successors). --dry-run
+                                 prints the plan and changes nothing.
+  handoff <receiver> [--brief PATH] [--seat KIND] [--scope session|task] [--dry-run]
+                                 relabel your tab "↪ <topic> → hoN", print the receiver's
+                                 tab label and the sibling list to announce to; record the
+                                 handoff in the ledger. --brief must name a file committed
+                                 (and unmodified) in its git repo; it is required when the
+                                 origin is a watchbill seat. The origin still owns the
+                                 seat until the receiver runs `relieve`.
+  relieve [--from ORIGIN] [--watch FILE]
+                                 the receiver records that it took over (two-party relief);
+                                 prints the line to send the origin and the receiver's next
+                                 steps. --watch names the file where the origin writes
+                                 `watcher stopped` (its run manifest, a builder's watch.md)
+  relief-check [--watch FILE] [--json]
+                                 either side of a relief: is the wait over? Each wait has a
+                                 deadline (configuration: relief_deadline_minutes, default 30).
+                                 exit 0 done; 1 wait; 2 deadline passed and the origin is
+                                 gone: the receiver takes the seat over (a takeover row) and
+                                 its tab shows ?; 4 deadline passed and the other side is
+                                 live: the tab shows ?, tell the human; 3 no relief involves
+                                 this session
+  promote <name> [--session SID] the human's explicit transfer: the seat answers to the human now
+  park [--system DIR]            a parked builder: needs DIR/dev-docs/watch.md (DIR
+                                 defaults to the git top level), then sets 👁 on your tab
+  closed                         record that THIS session finished /closeout (idempotent);
+                                 prints the historians to message and re-syncs the workspace's
+                                 ?. Run at the end of /closeout.
+  historian-check [--session SID] [--quiet]
+                                 may this historian exit? exit 0 = every head of its chain
+                                 closed, or (standing chains: builder, steward, standing,
+                                 advisor) the successor ran `relieve`; 1 = wait; 2 = a head
+                                 is gone without closing (tell the human); 3 = not a historian,
+                                 or task-scoped
+  exit [--done SIGNAL] [--relabel-shared] [--force] [--dry-run]
+                                 self-shutdown: pane resolved from the session id (never
+                                 $HERDR_PANE_ID). A historian once historian-check allows it;
+                                 a tab showing ✓, or an advisor, with --done naming the done
+                                 signal it saw (recorded as done-exited). --force = the human said
+                                 the human said so. Re-syncs the workspace's ?. Top-level sessions only,
+                                 never a subagent/fork/teammate.
+
+Handoff ledger: ~/.local/state/herdr-lifecycle/handoffs.jsonl (override: $HERDR_LIFECYCLE_LEDGER).
+Rows written since schema_version 2 (watchbill 0.2): every spawn, handoff and relieve row
+describes one seat and carries launched_by (who started the seat; fixed, copied down its
+handoff chain) and accountable (its launcher of record now: moves when that launcher's own
+seat is relieved by a successor, or when the human promotes the seat). Rows without
+schema_version are version 1 and still read.
+Home: the watchbill plugin's bin/; ~/.local/bin/herdr-lifecycle links to the installed copy
+(`watchbill install-links`).
+"""
+import json, os, re, shlex, shutil, socket, subprocess, sys, glob, time
+from datetime import datetime, timedelta, timezone
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import watchbill_config as config  # noqa: E402  (beside this file in the plugin's bin/)
+
+GLYPHS = {"active": "", "waiting": "⏳", "handed-off": "↪", "review": "✓", "parked": "💤",
+          "watching": "👁", "human": "?"}
+HUMAN_STATES = {"human"}
+GLYPH_SET = {g for g in GLYPHS.values() if g} | {"👁️"}  # 👁 with or without the emoji selector
+SCHEMA_VERSION = 2
+SEATS = ("builder", "steward", "build", "run", "standing", "advisor")
+STANDING_SEATS = {"builder", "steward", "standing", "advisor"}  # their historians exit on relief
+SLOT_RANK = {"builder": 0, "steward": 1, "build": 2, "run": 3, "standing": 4, "advisor": 5}
+HISTORIAN_RANK, UNKNOWN_RANK = 9, 6
+REASON_RE = re.compile(r"\s+\(([^()]*)\)$")
+NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")  # herdr agent-name rule; we use it for both
+HO_RE = re.compile(r"^(?P<base>.+?)-ho(?P<n>\d+)$")
+
+
+def headroom_command():
+    """The configured load check (headroom_command) as argv, or [] when none is configured.
+    A configured command whose program is not installed is skipped with a note."""
+    cmd = config.get("headroom_command")
+    if not cmd:
+        return []
+    argv = shlex.split(cmd)
+    if not shutil.which(argv[0]):
+        print(f"herdr-lifecycle: note: headroom_command {argv[0]!r} is not installed; skipping the load check",
+              file=sys.stderr)
+        return []
+    return argv
+
+
+def headroom_gate(argv):
+    """Refuse the spawn (exit 3) when the configured load check says no room."""
+    if "--override-headroom" in argv:
+        return
+    cmd = headroom_command()
+    if not cmd:
+        return
+    hc = subprocess.run(cmd, capture_output=True, text=True)
+    if hc.returncode != 0:
+        die(f"the load check `{' '.join(cmd)}` says no room for another session (exit {hc.returncode}); "
+            f"wait and retry, or pass --override-headroom with a reason", 3)
+
+
+def forbidden_model_in(model, claude_args):
+    """The forbidden model named by --model or in the claude arguments' --model, or ''."""
+    forbidden = config.get("forbidden_models")
+    cands = [model] if model else []
+    for i, a in enumerate(claude_args):
+        if a == "--model" and i + 1 < len(claude_args):
+            cands.append(claude_args[i + 1])
+        elif a.startswith("--model="):
+            cands.append(a.split("=", 1)[1])
+    return next((hit for c in cands if (hit := config.is_forbidden_model(c, forbidden))), "")
+
+
+def die(msg, code=1):
+    print(f"herdr-lifecycle: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def herdr(*args):
+    p = subprocess.run(["herdr", *args], capture_output=True, text=True)
+    if p.returncode != 0:
+        die(f"herdr {' '.join(args)} failed: {p.stderr.strip() or p.stdout.strip()}")
+    try:
+        return json.loads(p.stdout) if p.stdout.strip() else {}
+    except json.JSONDecodeError:
+        return {"raw": p.stdout}
+
+
+def snapshot():
+    return herdr("api", "snapshot")["result"]["snapshot"]
+
+
+def registry():
+    """Claude's live-session registry: sessionId -> record (name, nameSource, pid)."""
+    reg = {}
+    for f in glob.glob(os.path.expanduser("~/.claude/sessions/*.json")):
+        try:
+            j = json.load(open(f))
+        except Exception:
+            continue
+        if j.get("sessionId"):
+            reg[j["sessionId"]] = j
+    return reg
+
+
+def my_session_id():
+    """$CLAUDE_SESSION_ID if set, else walk up the process tree to the claude pid."""
+    sid = os.environ.get("CLAUDE_SESSION_ID")
+    if sid:
+        return sid
+    pid = os.getpid()
+    for _ in range(12):
+        f = os.path.expanduser(f"~/.claude/sessions/{pid}.json")
+        if os.path.exists(f):
+            try:
+                return json.load(open(f)).get("sessionId")
+            except Exception:
+                return None
+        out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        if not out or out == "1":
+            return None
+        pid = int(out)
+    return None
+
+
+def split_label(label):
+    """'↪ _topic words → ho2' -> (glyph, lead, topic, arrow-target)."""
+    s = (label or "").strip()
+    glyph = ""
+    for g in sorted(GLYPH_SET, key=len, reverse=True):
+        if s.startswith(g):
+            glyph, s = g, s[len(g):].lstrip()
+            break
+    glyph = "👁" if glyph == "👁️" else glyph
+    to = ""
+    if " → " in s:
+        s, to = s.split(" → ", 1)
+    if glyph == "?":  # the reason class belongs to the ? state, never to the topic
+        s = REASON_RE.sub("", s)
+    lead = s.startswith("_")
+    s = re.sub(r"\s+·\s+ho\d+$", "", s)  # a receiver's "· hoN" is not part of the topic
+    return glyph, lead, s.lstrip("_").strip(), to.strip()
+
+
+def label_reason(label):
+    """The reason class of a '? ...' label ('' for any other label)."""
+    s = (label or "").strip()
+    if not s.startswith("?"):
+        return ""
+    m = REASON_RE.search(s.split(" → ", 1)[0])
+    return m[1] if m else ""
+
+
+def compose(state, topic, lead=False, to="", ho="", reason=""):
+    glyph = GLYPHS[state]
+    body = ("_" if lead and state == "active" else "") + topic
+    if ho:
+        body += f" · {ho}"
+    if state in HUMAN_STATES:
+        body += f" ({reason or 'decision'})"
+    if to:
+        body += f" → {to}"
+    return f"{glyph} {body}".strip()
+
+
+def bare_label(label):
+    """A label without its leading "?" and lifecycle glyphs, lower-cased: use it for every lookup
+    of a workspace or tab by label, so "? EVENTS system" still finds "EVENTS system"."""
+    s = (label or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        for g in sorted(GLYPH_SET | {"?", "👁️"}, key=len, reverse=True):
+            if s.startswith(g):
+                s, changed = s[len(g):].lstrip(), True
+                break  # restart from the longest glyph ("👁️" before "👁")
+    return s.lower()
+
+
+def workspace_by_label(snap, label):
+    """The workspace whose label matches, ignoring a leading "?" or glyph and case; None if none."""
+    want = bare_label(label)
+    return next((w for w in snap.get("workspaces", []) if bare_label(w.get("label", "")) == want), None)
+
+
+def workspace_label_for(label, any_human):
+    """The workspace label carries a leading '? ' exactly while one of its tabs shows ?."""
+    base = (label or "").strip()
+    while base.startswith("?"):
+        base = base[1:].lstrip()
+    return f"? {base}" if any_human else base
+
+
+def sync_workspace(snap, ws_id, overrides=None):
+    """Re-derive the workspace label's ? from its tabs (overrides: tab_id -> new label)."""
+    overrides = overrides or {}
+    ws = next((w for w in snap.get("workspaces", []) if w["workspace_id"] == ws_id), None)
+    if not ws:
+        return None
+    labels = [overrides.get(t["tab_id"], t.get("label", "")) for t in snap.get("tabs", [])
+              if t.get("workspace_id", ws_id) == ws_id]
+    new = workspace_label_for(ws.get("label", ""), any(split_label(l)[0] == "?" for l in labels))
+    if new != ws.get("label", ""):
+        herdr("workspace", "rename", ws_id, new)
+        return new
+    return None
+
+
+def rows(snap, reg, workspace=None):
+    tabs = {t["tab_id"]: t for t in snap["tabs"]}
+    wss = {w["workspace_id"]: w for w in snap["workspaces"]}
+    out = []
+    for a in snap["agents"]:
+        if a.get("agent") != "claude":
+            continue
+        if workspace and a["workspace_id"] != workspace:
+            continue
+        sid = (a.get("agent_session") or {}).get("value")
+        r = reg.get(sid, {})
+        label = tabs.get(a["tab_id"], {}).get("label", "")
+        glyph, lead, topic, to = split_label(label)
+        out.append({
+            "workspace": wss.get(a["workspace_id"], {}).get("label", ""),
+            "tab_id": a["tab_id"], "pane_id": a["pane_id"], "tab_label": label,
+            "glyph": glyph, "lead": lead, "topic": topic, "to": to,
+            "claude_name": r.get("name"), "name_source": r.get("nameSource"),
+            "herdr_name": a.get("name"), "status": a.get("agent_status"),
+            "session_id": sid,
+        })
+    return out
+
+
+def chains(rs):
+    """Group live sessions by handoff base; the highest -hoN is current."""
+    by = {}
+    for r in rs:
+        n = r["claude_name"] or ""
+        m = HO_RE.match(n)
+        base, k = (m["base"], int(m["n"])) if m else (n, 1)
+        by.setdefault(base, []).append((k, r))
+    # A chain needs at least one -hoN member. Two sessions sharing one name are a
+    # collision, not a handoff.
+    return {b: sorted(v, key=lambda x: x[0]) for b, v in by.items() if any(k > 1 for k, _ in v)}
+
+
+def me(snap):
+    sid = my_session_id()
+    if not sid:
+        die("cannot find this Claude session (no $CLAUDE_SESSION_ID, no claude ancestor)")
+    for a in snap["agents"]:
+        if (a.get("agent_session") or {}).get("value") == sid:
+            return a, sid
+    die(f"session {sid[:8]} is not a herdr agent (run inside a herdr pane)")
+
+
+def cmd_whoami(argv):
+    snap, reg = snapshot(), registry()
+    a, sid = me(snap)
+    tab = next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
+    r = reg.get(sid, {})
+    print(json.dumps({"session_id": sid, "pane_id": a["pane_id"], "tab_id": a["tab_id"],
+                      "workspace_id": a["workspace_id"], "tab_label": tab["label"],
+                      "claude_name": r.get("name"), "name_source": r.get("nameSource"),
+                      "herdr_name": a.get("name")}, indent=1, ensure_ascii=False))
+
+
+def cmd_siblings(argv):
+    snap, reg = snapshot(), registry()
+    ws = None
+    if "--all" not in argv:
+        a, _ = me(snap)
+        ws = a["workspace_id"]
+    rs = rows(snap, reg, ws)
+    events = read_ledger(ledger_path())
+    pending = pending_reliefs(events)
+    if "--json" in argv:
+        print(json.dumps({"sessions": rs, "chains": {b: [r["claude_name"] for _, r in v] for b, v in chains(rs).items()},
+                          "pending_relief": pending}, indent=1, ensure_ascii=False))
+        return
+    # Address collisions are machine-wide (ListAgents is), so count over the whole registry.
+    from collections import Counter
+    dup = Counter(r.get("name") for r in reg.values() if r.get("name"))
+    current = {}
+    for b, v in chains(rs).items():
+        top = v[-1][1]["claude_name"]
+        for _, r in v:
+            if r["claude_name"] != top:
+                current[r["claude_name"]] = top
+    # Two-party relief: until the receiver runs `relieve`, the origin still owns the seat.
+    for o in [o for o in current if o in pending]:
+        del current[o]
+    print(f"{'':2} {'TAB LABEL':38} {'ADDRESS (SendMessage)':28} {'STATUS':8} NOTE")
+    for r in sorted(rs, key=lambda r: (r["workspace"], r["tab_label"])):
+        note = ""
+        nm = r["claude_name"] or "?"
+        if nm in pending:
+            note = f"handing off -> {pending[nm]}; {nm} owns the work until {pending[nm]} runs relieve"
+        elif nm in current:
+            note = f"handed off -> {current[nm]} owns the work; ask {nm} about history only"
+        elif r["glyph"] == "↪":
+            note = f"handed off -> {r['to'] or '?'}"
+        elif HO_RE.match(nm):
+            note = "current owner (handoff receiver)"
+        if dup.get(nm, 0) > 1:
+            note = (note + "; " if note else "") + (f"COLLIDES: {dup[nm]} live sessions answer to '{nm}' "
+                                                    f"(fix: /rename <slug> in this pane)")
+        elif r["name_source"] == "derived":
+            note = (note + "; " if note else "") + "unnamed (derived address, may collide)"
+        lab = r["tab_label"] if len(r["tab_label"]) <= 38 else r["tab_label"][:37] + "…"
+        print(f"{r['glyph'] or '·':2} {lab:38} {nm[:28]:28} {r['status'] or '':8} {note}")
+
+
+def resolve_tab(snap, tab):
+    if tab:
+        if ":t" in tab:
+            return next((t for t in snap["tabs"] if t["tab_id"] == tab), None) or die(f"no tab {tab}")
+        a = next((a for a in snap["agents"] if a["pane_id"] == tab or a.get("name") == tab), None)
+        if not a:
+            die(f"no tab, pane or herdr agent '{tab}'")
+        return next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
+    a, _ = me(snap)
+    return next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
+
+
+def opt(argv, flag, default=None):
+    if flag in argv:
+        i = argv.index(flag)
+        if i + 1 >= len(argv):
+            die(f"{flag} needs a value")
+        return argv[i + 1]
+    return default
+
+
+def cmd_label(argv):
+    if not argv or argv[0] not in GLYPHS:
+        die(f"usage: label <{'|'.join(GLYPHS)}> [--tab T] [--topic X] [--to NAME] [--reason R]")
+    state = argv[0]
+    snap = snapshot()
+    t = resolve_tab(snap, opt(argv, "--tab"))
+    print(relabel(snap, t, state, topic=opt(argv, "--topic"), to=opt(argv, "--to"),
+                  reason=opt(argv, "--reason")))
+
+
+def relabel(snap, t, state, topic=None, to=None, reason=None):
+    """Relabel tab t to `state`, keep its topic, and re-sync the workspace's ?."""
+    glyph, lead, old_topic, old_to = split_label(t["label"])
+    if state == "active" and not lead:  # a builder or steward is the tab's lead seat
+        names = [(registry().get((a.get("agent_session") or {}).get("value"), {}).get("name") or a.get("name") or "")
+                 for a in snap.get("agents", []) if a.get("tab_id") == t["tab_id"]]
+        events = read_ledger(ledger_path())
+        lead = any((seat_of(events, "", n) or seat_from_name(n)) in ("builder", "steward") for n in names if n)
+    topic = old_topic if topic is None else topic
+    to = (old_to if state == "handed-off" else "") if to is None else to
+    reason = (label_reason(t["label"]) if reason is None else reason) if state in HUMAN_STATES else ""
+    new = compose(state, topic, lead, to, reason=reason)
+    herdr("tab", "rename", t["tab_id"], new)
+    ws_id = t.get("workspace_id") or t["tab_id"].split(":")[0]
+    ws_new = sync_workspace(snap, ws_id, {t["tab_id"]: new})
+    return f"{t['tab_id']}: {t['label']!r} -> {new!r}" + (f"; workspace -> {ws_new!r}" if ws_new else "")
+
+
+def next_name(name, live_names):
+    m = HO_RE.match(name)
+    base, n = (m["base"], int(m["n"])) if m else (name, 1)
+    taken = {int(mm["n"]) for x in live_names if (mm := HO_RE.match(x)) and mm["base"] == base}
+    k = max([n] + list(taken)) + 1
+    cand = f"{base}-ho{k}"
+    if not NAME_RE.match(cand):
+        die(f"{cand!r} breaks the name rule [a-z][a-z0-9_-]{{0,31}}; shorten the base name")
+    return cand
+
+
+def cmd_next_name(argv):
+    reg = registry()
+    name = argv[0] if argv else None
+    if not name:
+        sid = my_session_id()
+        name = reg.get(sid, {}).get("name") or die("no name for this session; pass one")
+    print(next_name(name, [r.get("name") or "" for r in reg.values()]))
+
+
+# --- Seats (watchbill skills/watchbill/references/layout-and-start.md) -------------------
+
+SEAT_ALIASES = {"build lead": "build", "build-lead": "build", "task build lead": "build",
+                "run lead": "run", "run-lead": "run", "task run lead": "run",
+                "standing lead": "standing", "standing build lead": "standing",
+                "standing run lead": "standing", "editor": "standing"}
+
+
+def norm_seat(s):
+    s = re.split(r"[,(;:]", (s or "").lower().replace("*", ""))[0].strip()  # "Build lead, cycle 0.2" -> build
+    return s if s in SEATS else SEAT_ALIASES.get(s, "")
+
+
+def seat_name(seat, subject, task=""):
+    """Agent name = Claude -n address = herdr agent name, per the layout reference."""
+    if seat in ("build", "run", "standing") and not task:
+        die(f"--seat {seat} needs --task (the task, or the standing lead's function)")
+    return {"builder": f"{subject}-builder", "steward": f"{subject}-steward",
+            "build": f"{subject}-build-{task}", "run": f"{subject}-run-{task}",
+            "standing": f"{subject}-{task}",
+            "advisor": f"{subject}-advisor" + (f"-{task}" if task else "")}[seat]
+
+
+def seat_label(seat, subject, task=""):
+    s, t = subject.upper(), task.replace("-", " ")
+    return {"builder": f"_ {s} BUILDER", "steward": f"_ {s} STEWARD",
+            "build": f"{s} BUILD · {t}", "run": f"{s} RUN · {t}", "standing": f"{s} {t.upper()}",
+            "advisor": f"{s} ADVISOR" + (f" · {t}" if t else "")}[seat]
+
+
+def seat_from_name(name):
+    """Fallback for tabs started before spawn --seat recorded the seat."""
+    for pat, seat in ((r"-builder(-ho\d+)?$", "builder"), (r"-steward(-ho\d+)?$", "steward"),
+                      (r"-build-", "build"), (r"-run-", "run"), (r"-advisor(-|$)", "advisor")):
+        if re.search(pat, name or ""):
+            return seat
+    return ""
+
+
+def tab_rank(label, names, events):
+    """Slot rank of a tab from its label glyph and the seats of the sessions in it."""
+    if split_label(label)[0] == "↪":
+        return HISTORIAN_RANK
+    ranks = [SLOT_RANK[s] for n, sid in names
+             if (s := seat_of(events, sid, n) or seat_from_name(n)) in SLOT_RANK]
+    return min(ranks) if ranks else UNKNOWN_RANK
+
+
+def slot_index(ranks, new_rank):
+    """Where a new tab goes: right after the last tab ranked at or before it (0-based)."""
+    after = [i for i, r in enumerate(ranks) if r <= new_rank]
+    return after[-1] + 1 if after else 0
+
+
+def herdr_rpc(method, params):
+    """One request on herdr's socket, for methods the CLI does not expose (tab.move)."""
+    path = os.environ.get("HERDR_SOCKET_PATH") or os.path.expanduser("~/.config/herdr/herdr.sock")
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(10)
+        s.connect(path)
+        s.sendall((json.dumps({"id": f"hl-{os.getpid()}", "method": method, "params": params}) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    reply = json.loads(buf.split(b"\n", 1)[0] or b"{}")
+    if "error" in reply:
+        die(f"herdr {method} failed: {reply['error']}")
+    return reply.get("result", {})
+
+
+def move_to_slot(tab_id, ws_id, seat, events, reg):
+    snap = snapshot()
+    # The snapshot lists tabs in display order; "number" is the creation number, not the slot.
+    tabs = [t for t in snap["tabs"] if t["workspace_id"] == ws_id and t["tab_id"] != tab_id]
+    members = {}
+    for a in snap["agents"]:
+        sid = (a.get("agent_session") or {}).get("value")
+        members.setdefault(a["tab_id"], []).append((reg.get(sid, {}).get("name") or a.get("name") or "", sid))
+    ranks = [tab_rank(t.get("label", ""), members.get(t["tab_id"], []), events) for t in tabs]
+    idx = slot_index(ranks, SLOT_RANK[seat])
+    if idx < len(tabs):
+        herdr_rpc("tab.move", {"tab_id": tab_id, "insert_index": idx})
+    return idx
+
+
+def wait_for_session(name, timeout=20):
+    """The new session's id, once Claude registers it under its -n name."""
+    end = time.time() + timeout
+    while time.time() < end:
+        ids = [s for s, r in live_registry(registry()).items() if r.get("name") == name]
+        if len(ids) == 1:
+            return ids[0]
+        time.sleep(1)
+    return ""
+
+
+def cmd_spawn_seat(argv, claude_args):
+    seat = norm_seat(opt(argv, "--seat"))
+    if not seat:
+        die(f"--seat must be one of {', '.join(SEATS)}")
+    subject = opt(argv, "--subject") or die("--seat needs --subject")
+    task = opt(argv, "--task", "")
+    model = opt(argv, "--model") or die("--seat needs --model (never left to the default)")
+    bad = forbidden_model_in(model, claude_args)
+    if bad:
+        die(f"refused: {bad} is a forbidden model in this configuration (forbidden_models); "
+            f"pick another model")
+    for tok, n, what in ((subject, 8, "subject"), (task, 10, "task")):
+        if len(tok) > n:
+            print(f"herdr-lifecycle: warning: {what} token {tok!r} is over {n} characters; the sidebar "
+                  f"cuts labels at about 25", file=sys.stderr)
+    name = opt(argv, "--name") or seat_name(seat, subject, task)
+    if not NAME_RE.match(name):
+        die(f"{name!r}: names must match [a-z][a-z0-9_-]{{0,31}}; shorten --subject or --task")
+    reg = registry()
+    if name in {r.get("name") for r in live_registry(reg).values()}:
+        die(f"{name!r} is already a live Claude address; a live seat is never touched")
+    headroom_gate(argv)
+    snap = snapshot()
+    ws_id = opt(argv, "--workspace")
+    launcher = opt(argv, "--launched-by")
+    try:  # the caller's session; outside one, --workspace is required and the caller is the human
+        mine = me(snap)
+    except SystemExit:
+        if not ws_id:
+            raise
+        mine = None
+    caller = (reg.get(mine[1], {}).get("name") or mine[1]) if mine else "human"
+    ws_id = ws_id or mine[0]["workspace_id"]
+    launcher = launcher or caller  # restore passes the seat's original launcher
+    accountable = opt(argv, "--accountable") or caller
+    cwd = os.path.abspath(os.path.expanduser(opt(argv, "--cwd", os.getcwd())))
+    label = opt(argv, "--tab-label") or seat_label(seat, subject, task)
+    args = ["-n", name, "--model", model]
+    if opt(argv, "--effort"):
+        args += ["--effort", opt(argv, "--effort")]
+    if opt(argv, "--agent"):
+        args += ["--agent", opt(argv, "--agent")]
+    resume = opt(argv, "--resume", "")
+    if resume:
+        args += ["--resume", resume]
+    brief = opt(argv, "--brief", "")
+    if brief:
+        bp = os.path.expanduser(brief)
+        brief = os.path.abspath(bp if os.path.isabs(bp) else os.path.join(cwd, bp))
+    env = seat_env(seat, name, cwd, brief)
+    events = read_ledger(ledger_path())
+    if "--dry-run" in argv:
+        print(json.dumps({"dry_run": True, "name": name, "seat": seat, "tab_label": label, "workspace": ws_id,
+                          "cwd": cwd, "pane": "--pane" in argv, "claude_args": args + claude_args, "env": env,
+                          "launched_by": launcher, "accountable": accountable}, indent=1, ensure_ascii=False))
+        return
+    env_args = [x for k, v in env.items() for x in ("--env", f"{k}={v}")]
+    if "--pane" in argv:
+        mine = me(snap)[0]
+        res = herdr("pane", "split", mine["pane_id"], "--direction", "right", "--cwd", cwd, *env_args, "--no-focus")
+        pane, tab_id = res["result"]["pane"]["pane_id"], mine["tab_id"]
+    else:
+        res = herdr("tab", "create", "--workspace", ws_id, "--cwd", cwd, "--label", label, *env_args, "--no-focus")
+        root = res["result"]["root_pane"]
+        pane, tab_id = root["pane_id"], root.get("tab_id") or res["result"].get("tab", {}).get("tab_id", "")
+    herdr("agent", "start", name, "--kind", "claude", "--pane", pane, "--timeout", "120000",
+          "--", *args, *claude_args)
+    sid = wait_for_session(name)
+    append_event(ledger_path(), stamp(
+        {"event": "spawn", "name": name, "session_id": sid, "seat": seat, "subject": subject, "task": task,
+         "model": model, "effort": opt(argv, "--effort", ""), "agent": opt(argv, "--agent", ""),
+         "resumed": resume, "brief": brief, "workspace_id": ws_id, "tab_id": tab_id, "pane_id": pane, "cwd": cwd, "at": now()},
+        launcher, accountable))
+    slot = None
+    if "--pane" not in argv and tab_id:
+        try:  # a failed move leaves the seat recorded, only out of order
+            slot = move_to_slot(tab_id, ws_id, seat, events, registry())
+        except SystemExit:
+            slot = "move failed; tab left at the end"
+    print(json.dumps({"name": name, "seat": seat, "pane_id": pane, "tab_id": tab_id, "tab_label": label,
+                      "slot_index": slot, "session_id": sid or "not registered yet",
+                      "launched_by": launcher, "accountable": accountable}, ensure_ascii=False))
+
+
+def seat_env(seat, name, cwd, brief=""):
+    """The environment a seat's session starts with: who it is, so hooks and its primer know."""
+    env = {"WATCHBILL_SEAT": seat, "WATCHBILL_SEAT_NAME": name, "WATCHBILL_SYSTEM": cwd}
+    if brief:
+        env["WATCHBILL_BRIEF"] = brief
+    return env
+
+
+def live_registry(reg):
+    """Registry entries whose process is still running."""
+    out = {}
+    for sid, r in reg.items():
+        pid = r.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+        out[sid] = r
+    return out
+
+
+def cmd_spawn(argv):
+    if "--" in argv:
+        i = argv.index("--")
+        argv, claude_args = argv[:i], argv[i + 1:]
+    else:
+        claude_args = []
+    if "--seat" in argv:
+        return cmd_spawn_seat(argv, claude_args)
+    if not argv:
+        die("usage: spawn <name> [--tab-label L] [--new-tab] [--cwd D] [--override-headroom] -- <claude args>")
+    name = argv[0]
+    if not NAME_RE.match(name):
+        die(f"{name!r}: names must match [a-z][a-z0-9_-]{{0,31}} (herdr's rule; used for the Claude name too)")
+    if name in {r.get("name") for r in registry().values()}:
+        die(f"{name!r} is already a live Claude address; pick another (or `next-name {name}`)")
+    bad = forbidden_model_in("", claude_args)
+    if bad:
+        die(f"refused: {bad} is a forbidden model in this configuration (forbidden_models)")
+    headroom_gate(argv)
+    cwd = opt(argv, "--cwd", os.getcwd())
+    snap = snapshot()
+    a, _ = me(snap)
+    if "--new-tab" in argv:
+        label = opt(argv, "--tab-label", name)
+        res = herdr("tab", "create", "--workspace", a["workspace_id"], "--cwd", cwd, "--label", label, "--no-focus")
+        pane = res["result"]["root_pane"]["pane_id"]
+    else:
+        res = herdr("pane", "split", a["pane_id"], "--direction", "right", "--cwd", cwd, "--no-focus")
+        pane = res["result"]["pane"]["pane_id"]
+    herdr("agent", "start", name, "--kind", "claude", "--pane", pane, "--timeout", "120000",
+          "--", "-n", name, *claude_args)
+    print(json.dumps({"name": name, "pane_id": pane}))
+
+
+def cmd_handoff(argv):
+    if not argv:
+        die("usage: handoff <receiver-name> [--brief PATH] [--seat KIND] [--scope session|task] [--dry-run]")
+    receiver = argv[0]
+    if receiver.startswith("-"):
+        die(f"handoff: the receiver's name comes first (got {receiver!r}); "
+            f"usage: handoff <receiver-name> --brief PATH ...")
+    snap, reg = snapshot(), registry()
+    a, sid = me(snap)
+    events = read_ledger(ledger_path())
+    origin_name = reg.get(sid, {}).get("name")
+    seat = opt(argv, "--seat") or seat_of(events, sid, origin_name) or seat_from_name(origin_name)
+    if seat and seat not in SEATS:
+        die(f"--seat must be one of {', '.join(SEATS)}")
+    brief = opt(argv, "--brief")
+    if brief or seat:  # a seat's handoff needs a saved brief; anyone else's is checked if given
+        ok, why = brief_status(brief)
+        if not ok:
+            die(f"handoff refused: {why}" + (f" (a {seat} seat must hand off with --brief)" if seat else ""))
+        brief = why
+    t = next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
+    glyph, lead, topic, _ = split_label(t["label"])
+    m = HO_RE.match(receiver)
+    ho = f"ho{m['n']}" if m else receiver
+    origin_label = compose("handed-off", topic, lead, ho)
+    receiver_label = compose("active", topic, lead, ho=ho)
+    # The receiver's tab, if it has one to itself (a split pane shares the origin's tab).
+    rx = next((r for r in rows(snap, reg) if r["claude_name"] == receiver), None)
+    rx_tab = None
+    if rx and rx["tab_id"] != t["tab_id"] and sum(1 for x in snap["agents"] if x["tab_id"] == rx["tab_id"]) == 1:
+        rx_tab = rx["tab_id"]
+    scope = opt(argv, "--scope", "session")
+    if scope not in ("session", "task"):
+        die("--scope must be session or task")
+    rx_sids = [s_ for s_, r in live_registry(reg).items() if r.get("name") == receiver]
+    rx_sid = rx_sids[0] if len(rx_sids) == 1 else ""
+    if "--dry-run" not in argv:
+        if scope == "session":  # a task-scoped origin keeps its own label; it is not a historian
+            herdr("tab", "rename", t["tab_id"], origin_label)
+        if rx_tab:
+            herdr("tab", "rename", rx_tab, receiver_label)
+        append_event(ledger_path(), stamp(
+            {"event": "handoff", "origin_sid": sid, "origin_name": origin_name,
+             "receiver_name": receiver, "receiver_sid": rx_sid, "scope": scope, "seat": seat,
+             "brief": brief or "", "at": now(), "deadline_at": deadline_from_now()},
+            launched_by_of(events, sid, origin_name), accountable_now(events, sid, origin_name)))
+        sync_workspace(snap, a["workspace_id"], {t["tab_id"]: origin_label} if scope == "session" else {})
+    sibs = sorted({r["claude_name"] for r in rows(snap, reg, a["workspace_id"])
+                   if r["claude_name"] and r["session_id"] != sid and r["claude_name"] != receiver})
+    me_name = reg.get(sid, {}).get("name")
+    print(json.dumps({
+        "origin_tab": t["tab_id"], "origin_label": origin_label,
+        "receiver_tab_label": receiver_label,
+        "receiver_tab": rx_tab or ("not found: receiver is not a live session yet" if not rx else
+                                   "shared tab, not relabelled"),
+        "announce_to": sibs, "scope": scope,
+        "ledger": ("not written (dry run)" if "--dry-run" in argv else ledger_path())
+                  + ("" if rx_sid else f"; receiver session id unknown ({len(rx_sids)} live sessions named "
+                                       f"{receiver}), matched by name"),
+        "relief": (f"pending: {me_name} owns the work until {receiver} runs `herdr-lifecycle relieve`; "
+                   f"deadline {relief_minutes()} minutes (check with `herdr-lifecycle relief-check`)"
+                   if scope == "session" else "task scope: no relief"),
+        "announcement": (f"Handoff: \"{topic}\" is moving from {me_name} to {receiver}. {me_name} owns it "
+                         f"until {receiver} runs relieve; then send work to {receiver}. {me_name} stays "
+                         f"open as the historian: ask it about past decisions only."),
+    }, indent=1, ensure_ascii=False))
+
+
+def cmd_relieve(argv):
+    """The receiver's half of two-party relief: record that it took the seat over."""
+    sid = my_session_id() or die("cannot find this Claude session")
+    name = registry().get(sid, {}).get("name") or ""
+    path = ledger_path()
+    events = read_ledger(path)
+    origin = opt(argv, "--from")
+    # Match by session id, or by name: a receiver resumed after the handoff has a new id.
+    pending = [h for h in events if h.get("event") == "handoff" and h.get("scope", "session") == "session"
+               and (_same(h.get("receiver_sid"), h.get("receiver_name"), sid, name)
+                    or (name and h.get("receiver_name") == name))
+               and (not origin or h.get("origin_name") == origin) and not relieved(events, h)]
+    if not pending:
+        die("no handoff waits for you to relieve it" + (f" from {origin}" if origin else "")
+            + f" (looked for receiver {name or sid[:8]} in {path})")
+    h = pending[-1]
+    watch = opt(argv, "--watch", "")
+    watch = os.path.abspath(os.path.expanduser(watch)) if watch else ""
+    row = stamp({"event": "relieve", "origin_sid": h.get("origin_sid", ""), "origin_name": h.get("origin_name", ""),
+                 "receiver_sid": sid, "receiver_name": name, "scope": "session", "seat": h.get("seat", ""),
+                 "brief": h.get("brief", ""), "handoff_at": h.get("at", ""), "at": now(),
+                 "deadline_at": deadline_from_now(), "watch": watch,
+                 "watch_stopped_lines": stopped_lines(watch)},
+                h.get("launched_by"), h.get("accountable"))
+    append_event(path, row)
+    standing = h.get("seat") in STANDING_SEATS
+    origin_name = h.get("origin_name") or "the origin"
+    where = watch or "its run manifest (a builder's: dev-docs/watch.md)"
+    print(json.dumps({
+        "recorded": f"{name} relieved {h.get('origin_name')}" + (f" of the {h['seat']} seat" if h.get("seat") else ""),
+        "ledger": path, "launched_by": row["launched_by"], "accountable": row["accountable"],
+        "deadline": f"{row['deadline_at']} ({relief_minutes()} minutes)",
+        "tell_origin": (f"{name} has relieved you and owns the work now. Stop your watcher and write the "
+                        f"line `watcher stopped` in your run manifest (a builder: in dev-docs/watch.md)."
+                        + (" As the historian of a standing seat you may then exit (historian-check)." if standing else "")),
+        "next": (f"1. Send {origin_name} the tell_origin text now (SendMessage); nothing else tells it. "
+                 f"2. Arm no watcher until the line `watcher stopped` appears in {where}: wait on "
+                 f"`herdr-lifecycle relief-check{' --watch ' + shlex.quote(watch) if watch else ''}` (exit 1 = "
+                 f"wait; deadline {relief_minutes()} minutes). "
+                 f"3. Exit 0: arm your watcher. Exit 2: the deadline passed and {origin_name} is gone, so you "
+                 f"hold the seat: arm your watcher; your tab now shows ? (relief) for the human. Exit 4: "
+                 f"{origin_name} is live past the deadline: your tab shows ? (relief); tell the human."),
+    }, indent=1, ensure_ascii=False))
+
+
+# --- Relief deadlines: neither side of a relief waits forever ---------------------------
+
+def relief_minutes():
+    try:
+        return max(1, int(config.get("relief_deadline_minutes")))
+    except (TypeError, ValueError):
+        return 30
+
+
+def deadline_from_now(minutes=None):
+    t = datetime.now(timezone.utc) + timedelta(minutes=minutes or relief_minutes())
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_at(at):
+    try:
+        return datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def deadline_of(row, minutes=None):
+    """A handoff's or relieve's deadline: its own deadline_at, else its time plus the configured wait."""
+    d = parse_at(row.get("deadline_at") or "")
+    if d:
+        return d
+    at = parse_at(row.get("at") or "")
+    return at + timedelta(minutes=minutes or relief_minutes()) if at else None
+
+
+STOPPED = re.compile(r"watcher stopped", re.IGNORECASE)
+
+
+def stopped_lines(path):
+    """How many lines saying `watcher stopped` the file has now (0 when it is missing)."""
+    if not path:
+        return 0
+    try:
+        with open(path, errors="replace") as f:
+            return sum(1 for line in f if STOPPED.search(line))
+    except OSError:
+        return 0
+
+
+def relief_status(events, sid, name, live_sids, live_names, now_dt=None, watch=None):
+    """(code, role, reason, row) for relief-check. Codes: 0 done, 1 wait, 2 deadline passed and
+    the origin is gone (the receiver takes over), 4 deadline passed and the other side is live
+    (tell the human), 3 no relief involves this session."""
+    now_dt = now_dt or datetime.now(timezone.utc)
+
+    def alive(s, n):
+        return (s in live_sids) if s else (n in live_names)
+
+    cands = []
+    for e in events:
+        if e.get("event") == "relieve" and _same(e.get("receiver_sid"), e.get("receiver_name"), sid, name):
+            cands.append(("receiver", e))
+        elif (e.get("event") == "handoff" and e.get("scope", "session") == "session"
+              and _same(e.get("origin_sid"), e.get("origin_name"), sid, name)):
+            cands.append(("origin", e))
+        elif (e.get("event") == "handoff" and e.get("scope", "session") == "session"
+              and (_same(e.get("receiver_sid"), e.get("receiver_name"), sid, name)
+                   or (name and e.get("receiver_name") == name)) and not relieved(events, e)):
+            cands.append(("unrelieved", e))
+    if not cands:
+        return 3, "", "no relief involves this session", None
+    role, row = max(cands, key=lambda c: c[1].get("at", ""))
+    deadline = deadline_of(row)
+    late = bool(deadline and now_dt >= deadline)
+    left = f"{max(0, int((deadline - now_dt).total_seconds() // 60))} min left" if deadline else "no deadline"
+    if role == "unrelieved":
+        return 1, "receiver", f"run `herdr-lifecycle relieve` first: {row.get('origin_name')} handed you the work", row
+    if role == "origin":
+        rx = row.get("receiver_name") or row.get("receiver_sid") or "the receiver"
+        if relieved(events, row):
+            return 0, "origin", (f"{rx} relieved you: stop your watcher and write `watcher stopped` in your run "
+                                 f"manifest (a builder: dev-docs/watch.md)"), row
+        if not late:
+            return 1, "origin", f"wait: {rx} has not run relieve yet ({left}); you still own the seat", row
+        state = "is live" if alive(row.get("receiver_sid"), row.get("receiver_name")) else "is gone"
+        return 4, "origin", (f"deadline passed: {rx} {state} and has not run relieve; you still own the seat. "
+                             f"Tell the human"), row
+    # receiver after relieve: wait for the origin's `watcher stopped`
+    if any(e.get("event") == "takeover" and e.get("relieve_at") == row.get("at")
+           and _same(e.get("receiver_sid"), e.get("receiver_name"), sid, name) for e in events):
+        return 0, "receiver", "already taken over after the deadline: your watcher is yours to arm", row
+    origin = row.get("origin_name") or row.get("origin_sid") or "the origin"
+    path = watch or row.get("watch") or ""
+    if path and stopped_lines(path) > int(row.get("watch_stopped_lines") or 0):
+        return 0, "receiver", f"{origin} wrote `watcher stopped` in {path}: arm your watcher", row
+    if not late:
+        return 1, "receiver", (f"wait for `watcher stopped` from {origin}" + (f" in {path}" if path else
+                                " (pass --watch FILE to see it)") + f" ({left})"), row
+    if alive(row.get("origin_sid"), row.get("origin_name")):
+        return 4, "receiver", (f"deadline passed: {origin} is live but has not written `watcher stopped`. "
+                               f"Do not arm a second watcher; tell the human"), row
+    return 2, "receiver", (f"deadline passed and {origin} is gone: you hold the seat. Arm your watcher; your tab "
+                           f"shows ? (relief) so the human sees the takeover"), row
+
+
+def cmd_relief_check(argv):
+    sid = my_session_id() or die("cannot find this Claude session")
+    reg = registry()
+    name = reg.get(sid, {}).get("name") or ""
+    path = ledger_path()
+    events = read_ledger(path)
+    watch = opt(argv, "--watch")
+    watch = os.path.abspath(os.path.expanduser(watch)) if watch else None
+    code, role, reason, row = relief_status(events, sid, name, *live_state(reg), watch=watch)
+    labelled = ""
+    if code == 2:
+        append_event(path, stamp({"event": "takeover", "origin_sid": row.get("origin_sid", ""),
+                                  "origin_name": row.get("origin_name", ""), "receiver_sid": sid,
+                                  "receiver_name": name, "seat": row.get("seat", ""),
+                                  "relieve_at": row.get("at", ""), "at": now(),
+                                  "why": "relief deadline passed and the origin is gone"},
+                                 row.get("launched_by"), row.get("accountable")))
+    if code in (2, 4):
+        try:
+            snap = snapshot()
+            a, _ = me(snap)
+            t = next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
+            if label_reason(t["label"]) != "relief" or split_label(t["label"])[0] != "?":
+                labelled = relabel(snap, t, "human", reason="relief")
+        except SystemExit:
+            labelled = "could not relabel the tab (herdr not reachable): tell the human yourself"
+    out = {"code": code, "role": role, "reason": reason, "deadline": (row or {}).get("deadline_at", "")}
+    if labelled:
+        out["label"] = labelled
+    print(json.dumps(out, ensure_ascii=False) if "--json" in argv else
+          reason + (f"\n{labelled}" if labelled else ""))
+    sys.exit(code)
+
+
+def cmd_promote(argv):
+    """The human's explicit transfer: the seat answers to the human from now on."""
+    if not argv or argv[0].startswith("--"):
+        die("usage: promote <name> [--session SID]")
+    name, sid = argv[0], opt(argv, "--session", "")
+    path = ledger_path()
+    events = read_ledger(path)
+    r = seat_row(events, sid, name)
+    if not r:
+        die(f"no spawn or relieve row for {name} in {path}: nothing to promote")
+    append_event(path, {"event": "promote", "schema_version": SCHEMA_VERSION, "name": name,
+                        "session_id": sid or r.get("session_id") or r.get("receiver_sid") or "",
+                        "launched_by": r.get("launched_by") or "unrecorded",
+                        "previous_accountable": accountable_now(events, sid, name), "accountable": "human",
+                        "at": now()})
+    print(f"recorded: {name} now answers to the human (was {accountable_now(events, sid, name) or 'unrecorded'})")
+
+
+def system_dir(argv):
+    d = opt(argv, "--system")
+    if not d:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        d = top.stdout.strip() if top.returncode == 0 else os.getcwd()
+    return os.path.abspath(os.path.expanduser(d))
+
+
+def cmd_park(argv):
+    """A parked builder: only with a written watch, then 👁 on its own tab."""
+    d = system_dir(argv)
+    watch = os.path.join(d, "dev-docs", "watch.md")
+    if not os.path.isfile(watch):
+        die(f"park refused: {watch} does not exist. Write the watch first (what you watch, the "
+            f"trigger, the owner), or close out instead of parking.")
+    snap = snapshot()
+    a, sid = me(snap)
+    t = next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
+    print(relabel(snap, t, "watching"))
+    append_event(ledger_path(), {"event": "park", "schema_version": SCHEMA_VERSION, "session_id": sid,
+                                 "name": registry().get(sid, {}).get("name") or "", "watch": watch, "at": now()})
+
+
+# --- Handoff ledger (historian exit; design in historian-exit.md) ---------------------
+
+def ledger_path():
+    return os.environ.get("HERDR_LIFECYCLE_LEDGER") or os.path.expanduser(
+        "~/.local/state/herdr-lifecycle/handoffs.jsonl")
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_ledger(path):
+    out = []
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(e, dict) and e.get("event"):
+                    e.setdefault("schema_version", 1)  # rows from before watchbill 0.2
+                    out.append(e)
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def append_event(path, ev):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
+
+# --- Lineage: launched_by (fixed) and accountable (moves) — watchbill question 20 --------
+
+def seat_row(events, sid, name):
+    """The newest row that started this seat-holder: its spawn, or the relieve it ran."""
+    best = None
+    for e in events:
+        if e.get("event") == "spawn" and _same(e.get("session_id"), e.get("name"), sid, name):
+            best = e
+        elif e.get("event") == "relieve" and _same(e.get("receiver_sid"), e.get("receiver_name"), sid, name):
+            best = e
+    return best
+
+
+def seat_of(events, sid, name):
+    r = seat_row(events, sid, name)
+    return (r or {}).get("seat") or ""
+
+
+def launched_by_of(events, sid, name):
+    return (seat_row(events, sid, name) or {}).get("launched_by") or ""
+
+
+def accountable_now(events, sid, name):
+    """Who answers for this seat now: its launcher of record, followed through every
+    relief of the launcher's own seat, and through the human's promotions of this seat."""
+    r = seat_row(events, sid, name)
+    if not r:
+        return ""
+    acc, since = r.get("accountable") or r.get("launched_by") or "", r.get("at", "")
+    for e in sorted((e for e in events if e.get("at", "") >= since), key=lambda e: e.get("at", "")):
+        if e is r:
+            continue
+        if e.get("event") == "relieve" and acc and e.get("origin_name") == acc:
+            acc = e.get("receiver_name") or acc
+        elif e.get("event") == "promote" and _same(e.get("session_id"), e.get("name"), sid, name):
+            acc = e.get("accountable") or "human"
+    return acc
+
+
+def relieved(events, h):
+    """Has the receiver of handoff row h run `relieve` for it?"""
+    return any(e.get("event") == "relieve"
+               and _same(e.get("origin_sid"), e.get("origin_name"), h.get("origin_sid"), h.get("origin_name"))
+               and e.get("at", "") >= h.get("at", "")
+               and (e.get("handoff_at") == h.get("at") and e.get("receiver_name") == h.get("receiver_name")
+                    or _same(e.get("receiver_sid"), e.get("receiver_name"), h.get("receiver_sid"), h.get("receiver_name")))
+               for e in events)
+
+
+def pending_reliefs(events):
+    """origin name -> receiver name, for every 0.2 session handoff not yet relieved."""
+    return {h.get("origin_name"): h.get("receiver_name") for h in events
+            if h.get("event") == "handoff" and h.get("scope", "session") == "session"
+            and h.get("schema_version", 1) >= 2 and not relieved(events, h)}
+
+
+def stamp(ev, launched_by, accountable):
+    return {**ev, "schema_version": SCHEMA_VERSION, "launched_by": launched_by or "unrecorded",
+            "accountable": accountable or "unrecorded"}
+
+
+def brief_status(path):
+    """(ok, reason): the brief exists and is committed, unmodified, in its git repository."""
+    if not path:
+        return False, "no --brief given"
+    p = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(p):
+        return False, f"brief {p} does not exist"
+    d = os.path.dirname(p)
+    top = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if top.returncode != 0:
+        return False, f"brief {p} is not inside a git repository"
+    tracked = subprocess.run(["git", "-C", d, "ls-files", "--error-unmatch", p], capture_output=True, text=True)
+    if tracked.returncode != 0:
+        return False, f"brief {p} is not committed (git add and commit it first)"
+    clean = subprocess.run(["git", "-C", d, "diff", "--quiet", "HEAD", "--", p], capture_output=True, text=True)
+    if clean.returncode != 0:
+        return False, f"brief {p} has uncommitted changes; commit them so the receiver reads what you saved"
+    return True, p
+
+
+def _same(a_sid, a_name, b_sid, b_name):
+    """Match by session id when both sides have one, else by name."""
+    if a_sid and b_sid:
+        return a_sid == b_sid
+    return bool(a_name) and a_name == b_name
+
+
+def live_state(reg):
+    sids, names = set(), set()
+    for sid, r in reg.items():
+        pid = r.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+        sids.add(sid)
+        if r.get("name"):
+            names.add(r["name"])
+    return sids, names
+
+
+def chain_heads(events, sid, name, since, seen):
+    """The sessions that own the work now, starting from (sid, name)."""
+    key = sid or name
+    if key in seen:
+        return []
+    seen.add(key)
+    out_ = [h for h in events if h.get("event") == "handoff"
+            and _same(h.get("origin_sid"), h.get("origin_name"), sid, name) and h.get("at", "") >= since]
+    sess = [h for h in out_ if h.get("scope", "session") != "task"]
+    task = [h for h in out_ if h.get("scope", "session") == "task"]
+    heads = [] if sess else [(sid, name, since)]
+    for h in sess + task:
+        heads += chain_heads(events, h.get("receiver_sid") or "", h.get("receiver_name") or "", h.get("at", ""), seen)
+    return heads
+
+
+def historian_status(events, sid, live_sids, live_names):
+    """(exit code, reason) for historian-check. See the subcommand help for the codes."""
+    mine = [h for h in events if h.get("event") == "handoff" and h.get("origin_sid") == sid]
+    if not mine:
+        return 3, "not a historian: no handoff from this session in the ledger"
+    sess = [h for h in mine if h.get("scope", "session") != "task"]
+    if not sess:
+        return 3, "task-scoped handoff only: this session keeps its own work; its end is its own /closeout"
+    # A standing seat never closes out, so its historian may go once the successor relieved it.
+    done = [h for h in sess if h.get("seat") in STANDING_SEATS and relieved(events, h)]
+    sess = [h for h in sess if h not in done]
+    if not sess:
+        return 0, ("standing chain: successor ran relieve (" +
+                   ", ".join(h.get("receiver_name") or h.get("receiver_sid") or "?" for h in done) + "); exit")
+    seen, heads = {sid}, []
+    for h in sess:
+        heads += chain_heads(events, h.get("receiver_sid") or "", h.get("receiver_name") or "", h.get("at", ""), seen)
+    if not heads:
+        return 1, "no head found (cycle in the ledger?); wait for the human"
+    closed_ = [e for e in events if e.get("event") == "closed"]
+    status = []
+    for hsid, hname, since in heads:
+        is_closed = any(_same(e.get("session_id"), e.get("name"), hsid, hname) and e.get("at", "") >= since
+                        for e in closed_)
+        is_live = (hsid in live_sids) if hsid else (hname in live_names)
+        status.append((hname or hsid, "closed" if is_closed else "live" if is_live else "gone"))
+    desc = ", ".join(f"{n}: {st}" for n, st in status)
+    if all(st == "closed" for _, st in status):
+        return 0, f"every head closed out ({desc}); exit"
+    if any(st == "gone" for _, st in status):
+        return 2, f"a head is gone without closing out ({desc}); tell the human, do not exit"
+    return 1, f"wait ({desc})"
+
+
+def receiver_label_from(label):
+    """The label a shared tab should carry once the historian leaves it."""
+    glyph, lead, topic, to = split_label(label)
+    return compose("active", topic, lead, ho=to if re.fullmatch(r"ho\d+", to or "") else "")
+
+
+def launch_exit(pane):
+    """Type /exit into OUR OWN pane after we end the turn, then close the pane."""
+    q = shlex.quote(pane)
+    subprocess.Popen(["sh", "-c", f"sleep 6; herdr pane send-text {q} /exit; sleep 1; "
+                      f"herdr pane send-keys {q} enter; sleep 3; herdr pane send-keys {q} enter; "
+                      f"sleep 3; herdr pane close {q}"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def cmd_closed(argv):
+    sid = my_session_id() or die("cannot find this Claude session")
+    reg = registry()
+    name = reg.get(sid, {}).get("name") or ""
+    path = ledger_path()
+    ev = read_ledger(path)
+    if any(e.get("event") == "closed" and e.get("session_id") == sid for e in ev):
+        print(f"already recorded: {name or sid[:8]} closed")
+    else:
+        append_event(path, {"event": "closed", "session_id": sid, "name": name, "at": now()})
+        print(f"recorded: {name or sid[:8]} closed -> {path}")
+    # Historians to message: every origin whose chain leads here.
+    hist, todo, seen = [], [(sid, name)], set()
+    while todo:
+        s_, n_ = todo.pop()
+        for h in ev:
+            if h.get("event") == "handoff" and _same(h.get("receiver_sid"), h.get("receiver_name"), s_, n_):
+                k = h.get("origin_sid") or h.get("origin_name")
+                if k not in seen:
+                    seen.add(k)
+                    hist.append(h.get("origin_name") or k)
+                    todo.append((h.get("origin_sid"), h.get("origin_name")))
+    if hist:
+        print("historians to message (one line each: closeout done): " + ", ".join(hist))
+    try:  # a ? left on this workspace by a tab that has since moved on
+        snap = snapshot()
+        a = next((a for a in snap["agents"] if (a.get("agent_session") or {}).get("value") == sid), None)
+        if a:
+            sync_workspace(snap, a["workspace_id"])
+    except SystemExit:
+        pass
+
+
+def cmd_historian_check(argv):
+    sid = opt(argv, "--session") or my_session_id() or die("cannot find this Claude session")
+    code, reason = historian_status(read_ledger(ledger_path()), sid, *live_state(registry()))
+    if "--quiet" not in argv:
+        print(reason)
+    sys.exit(code)
+
+
+def done_status(events, sid, name, label):
+    """(ok, why) for `exit --done`: a tab showing ✓ (its done signal is the caller's to name) or an
+    advisor seat (on call; it leaves when its question is answered)."""
+    if split_label(label)[0] == "✓":
+        return True, "tab shows ✓ (done, for the human's review)"
+    seat = seat_of(events, sid, name) or seat_from_name(name)
+    if seat == "advisor":
+        return True, "advisor seat (on call)"
+    return False, (f"--done is for a ✓ tab or an advisor; this tab is {label!r} (seat {seat or 'unknown'}). "
+                   f"Set ✓ with `label review` once your report is filed, or ask the human")
+
+
+def cmd_exit(argv):
+    snap = snapshot()
+    a, sid = me(snap)
+    t = next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
+    events = read_ledger(ledger_path())
+    done = opt(argv, "--done")
+    if "--force" in argv:
+        why = "the human's word (--force)"
+    elif done is not None:
+        if not done.strip():
+            die("--done needs the done signal you saw (for example 'report filed: <path>')")
+        ok, reason = done_status(events, sid, registry().get(sid, {}).get("name") or "", t["label"])
+        if not ok:
+            die(f"not eligible to exit: {reason}")
+        why = f"done: {done} ({reason})"
+    else:
+        code, reason = historian_status(events, sid, *live_state(registry()))
+        if code != 0:
+            die(f"not eligible to exit: {reason}. A ✓ tab or an advisor uses --done '<signal>'; "
+                f"pass --force only when the human said so.")
+        why = reason
+    others = [x for x in snap["agents"] if x["tab_id"] == a["tab_id"] and x["pane_id"] != a["pane_id"]]
+    new_label = None
+    if others:
+        if "--relabel-shared" not in argv:
+            die(f"tab {t['tab_id']} is shared with {len(others)} other agent(s); pass --relabel-shared so it "
+                f"does not keep the ↪ label after you leave")
+        new_label = receiver_label_from(t["label"])
+    plan = {"pane": a["pane_id"], "tab": t["tab_id"], "relabel_shared_tab": new_label, "why": why}
+    if "--dry-run" in argv:
+        print(json.dumps({"dry_run": True, **plan}, ensure_ascii=False))
+        return
+    if new_label:
+        herdr("tab", "rename", t["tab_id"], new_label)
+    # The tab closes with this pane unless it is shared: drop its label from the workspace's ? count.
+    sync_workspace(snap, a["workspace_id"], {t["tab_id"]: new_label if others else ""})
+    append_event(ledger_path(), {"event": "done-exited" if done is not None and "--force" not in argv
+                                 else "historian-exited", "session_id": sid, "pane_id": a["pane_id"],
+                                 "why": why, "at": now()})
+    launch_exit(a["pane_id"])
+    print(json.dumps(plan, ensure_ascii=False) + "\nExit scheduled in ~6 s: end your turn now.")
+
+
+CMDS = {"whoami": cmd_whoami, "siblings": cmd_siblings, "label": cmd_label,
+        "next-name": cmd_next_name, "spawn": cmd_spawn, "handoff": cmd_handoff,
+        "closed": cmd_closed, "historian-check": cmd_historian_check, "exit": cmd_exit,
+        "relieve": cmd_relieve, "relief-check": cmd_relief_check, "promote": cmd_promote, "park": cmd_park}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
+        print(__doc__)
+        sys.exit(0 if len(sys.argv) < 2 else 2)
+    CMDS[sys.argv[1]](sys.argv[2:])

@@ -1,0 +1,1411 @@
+#!/usr/bin/env python3
+"""watchbill — a system's status from its records, its seats, its landings and its configuration.
+
+  watchbill status <system-dir> [--json]
+      Who has the ball, the last run, the cycle state and which seats are alive. Read-only:
+      it reads the README roster, `herdr-lifecycle siblings --all --json`, the run manifest
+      (named in the README, else the newest `*manifest*.jsonl` or `runs.jsonl` up to two
+      folders down), recent commits with Watchbill-* trailers (landings and the approval
+      each one names), the rules SHA, and the decisions for the human: the system's one
+      decisions file (dev-docs/decisions.md; dev-docs/questions.md is the legacy name, then
+      decisions.md) and a README section headed "Decisions for the human" (or for the
+      configured human_name). A card whose answer sits only inside an unaccepted Track
+      Changes suggestion is open ("proposed"): marks are read with criticmarkup.py's own
+      parser (the copy beside this tool; $WATCHBILL_CRITICMARKUP overrides).
+      Needs-human items: the newest manifest line with a `needs_human` field (a count, or
+      reason class -> count), computed by the system's tool. Where a source is missing the Ball line says "unknown", never "nobody". It
+      writes nothing and messages no one.
+  watchbill-status <system-dir>   same as `watchbill status`.
+
+  watchbill restore <system-dir> [--dry-run] [--workspace W] [--cause TEXT] [--stalled]
+      Re-spawn every roster seat that is not live, with `herdr-lifecycle spawn --seat`,
+      after a usage limit, a reboot or an account switch. A seat whose Start column says
+      "resume" resumes its last session (id from the handoff ledger, else the newest
+      transcript titled with its name); "fresh" starts clean. Each restored seat gets a
+      first prompt: why it was restored, its brief (the roster's Brief column), re-arm its
+      watcher, relabel its tab. An Agent column is passed as --agent. The workspace is
+      --workspace, else the one a live roster seat sits in, else the one the ledger last
+      spawned a roster seat into, else the workspace labelled per the workspace_label option ("<SUBJECT> system") (a leading
+      "?" or glyph is ignored), else a new one with that label.
+      A live seat is never respawned. A live seat whose pane shows a usage-limit or API
+      error and is not working is reported as stalled; --stalled types "continue" into it.
+      Run --dry-run first: it prints each command and changes nothing.
+
+  watchbill install-links [--dev DIR] [--check] [--dry-run] [--from NAME@MARKETPLACE]
+                          [--bin-dir DIR] [--force]
+      Point ~/.local/bin/{herdr-lifecycle,herdr-session-search,watchbill} at the installed
+      plugin's bin/: the user-scope `watchbill@…` entry in ~/.claude/plugins/installed_plugins.json
+      (its installPath; $WATCHBILL_PLUGINS_FILE overrides the file). Run it after every plugin
+      update: the install path carries the version, so links into an old version go stale.
+      --dev DIR points them at a working tree instead (DIR/plugin/bin, else DIR/bin), for
+      testing; switch back with a plain run. --check changes nothing and exits 1 when a link
+      does not point at the installed copy (or at DIR with --dev). A file in the way that is
+      not a symlink is refused unless --force. With two user-scope installs from different
+      marketplaces, --from picks one.
+
+  watchbill config [--explain] [--json] [KEY]
+      The resolved configuration: (EVAL_)WATCHBILL_<KEY>, then CLAUDE_PLUGIN_OPTION_<KEY>, then the
+      plugin's options in the user settings (pluginConfigs, read only), then the default.
+      --explain names each value's source. With one KEY, prints only its value.
+
+  watchbill land <branch> --backfill owed|none --steward affected|unaffected|none
+                 [--approved WHERE] [--fixes SHA]... [--cycle ID] [--message TEXT]
+                 [--system DIR] [--wait MIN] [--dry-run]
+      The builder lands a build branch: merges it --no-ff into the branch checked out in the
+      PRIMARY checkout (the steward's), with the trailers Watchbill-Event: landed,
+      Watchbill-Backfill, Watchbill-Steward, and Watchbill-Fixes, Watchbill-Approved (where
+      the human's approval is recorded; single-use: an approval an earlier landing named is
+      refused) and Watchbill-Cycle when given. Refused (exit 3) while the live steward's tab
+      shows working, that is mid-item; --wait polls up to MIN minutes. A steward that is not
+      live does not block: the landed commit is its message. A conflict aborts the merge.
+
+  watchbill rules-sha [DIR] [--full] [--explain]
+      The rules SHA to stamp on an item: the newest first-parent commit on HEAD that touched
+      the rules paths (an owners.yaml `rules:` list, else the builder's and build leads'
+      paths, else the whole tree). Exit 1 while rules paths have uncommitted changes.
+
+  watchbill check-note <file>... [--json]
+      After a change arrives from outside (another device, a sync), check a note before
+      writing: Track Changes marks balanced, no heading twice under one parent, no long
+      paragraph repeated, one frontmatter block, no sync conflict copy beside it. Exit 1 on
+      any problem. It also reports the hold switch.
+
+  watchbill hold [PATH]
+      Is the human's hold switch on for PATH (default: here)? A `.watchbill-hold` or
+      `watchbill-hold.md` file at the vault or repository root; while it exists every
+      writer refuses. Exit 4 when on, 0 when off. The human sets and clears it.
+
+  watchbill context [--session SID] [--transcript PATH] [--json]
+      This session's context size from its transcript. Exit 0 ok; 1 offer a handoff (the
+      cost band, handoff_offer_tokens); 2 hand off (handoff_hard_percent of
+      context_window_tokens).
+
+Roster: a markdown table in <system-dir>/README.md, under a heading containing "Roster"
+(or any table with Seat and Agent name columns). Columns: Seat | Agent name | Model |
+Effort | Start, optional Brief, Cwd, Subject and Agent. No session ids in the roster.
+"""
+import glob, importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile, time
+
+sys.dont_write_bytecode = True  # loading herdr-lifecycle must not leave bin/__pycache__ behind
+HERE = os.path.dirname(os.path.realpath(__file__))
+HL_PATH = os.path.join(HERE, "herdr-lifecycle")
+_loader = importlib.machinery.SourceFileLoader("herdr_lifecycle", HL_PATH)
+hl = importlib.util.module_from_spec(importlib.util.spec_from_loader("herdr_lifecycle", _loader))
+_loader.exec_module(hl)
+sys.path.insert(0, HERE)
+import watchbill_config as config  # noqa: E402
+import watchbill_hold as hold  # noqa: E402
+
+
+def read_text(path):
+    with open(path, errors="replace") as f:
+        return f.read()
+
+
+def die(msg, code=1):
+    print(f"watchbill: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# --- Roster -------------------------------------------------------------------------
+
+def parse_tables(text):
+    """Every markdown table as (heading, [row dicts keyed by lower-cased header])."""
+    out, heading, lines = [], "", text.splitlines()
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("#"):
+            heading = ln.lstrip("#").strip()
+        if ln.strip().startswith("|") and i + 1 < len(lines) and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i + 1]):
+            head = [c.strip().strip("*").lower() for c in ln.strip().strip("|").split("|")]
+            rows, i = [], i + 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                rows.append(dict(zip(head, cells)))
+                i += 1
+            out.append((heading, rows))
+            continue
+        i += 1
+    return out
+
+
+def clean(cell):
+    return re.sub(r"[`*]", "", cell or "").strip()
+
+
+def roster(text):
+    """The roster rows: from a table under a 'Roster' heading, else any Seat/Agent-name table."""
+    tables = parse_tables(text)
+    pick = [rows for h, rows in tables if "roster" in h.lower() and rows and "agent name" in rows[0]]
+    pick = pick or [rows for h, rows in tables if rows and "seat" in rows[0] and "agent name" in rows[0]]
+    if not pick:
+        return []
+    out = []
+    for r in pick[0]:
+        name = clean(r.get("agent name"))
+        if not name or not hl.NAME_RE.match(name):
+            continue
+        model = clean(next((v for k, v in r.items() if k.startswith("model")), "")).lower()
+        effort = clean(r.get("effort")).lower()
+        if not effort and re.search(r"[,\s]", model):  # one "Model and effort" column: "Opus, high"
+            parts = [x for x in re.split(r"[,\s]+", model) if x]
+            model, effort = parts[0], (parts[1] if len(parts) > 1 else "")
+        out.append({"seat": hl.norm_seat(clean(r.get("seat"))), "seat_text": clean(r.get("seat")), "name": name,
+                    "model": model.split()[0] if model else "", "effort": effort,
+                    "start": clean(r.get("start")).lower(), "brief": clean(r.get("brief")),
+                    "cwd": clean(r.get("cwd")), "subject": clean(r.get("subject")),
+                    "agent": clean(r.get("agent"))})
+    return out
+
+
+def system_subject(rows):
+    for r in rows:
+        if r["subject"]:
+            return r["subject"]
+    for r in rows:
+        m = re.match(r"^(.+)-(builder|steward)(-ho\d+)?$", r["name"])
+        if m and r["seat"] in ("builder", "steward"):
+            return m[1]
+    return ""
+
+
+def seat_task(row, subject):
+    """The --task that rebuilds this row's name, or None if the name does not fit the seat."""
+    name, seat = re.sub(r"-ho\d+$", "", row["name"]), row["seat"]
+    prefix = {"build": f"{subject}-build-", "run": f"{subject}-run-", "standing": f"{subject}-",
+              "advisor": f"{subject}-advisor"}.get(seat)
+    if seat in ("builder", "steward"):
+        return "" if name == f"{subject}-{seat}" else None
+    if not prefix or not name.startswith(prefix):
+        return None
+    task = name[len(prefix):]
+    if seat == "advisor":
+        return task.lstrip("-")
+    return task or None
+
+
+# --- Records ------------------------------------------------------------------------
+
+def git(d, *args):
+    p = subprocess.run(["git", "-C", d, *args], capture_output=True, text=True)
+    return p.stdout if p.returncode == 0 else ""
+
+
+def build_events(d, n=60):
+    """Commits with Watchbill-* trailers, newest first: (sha, date, subject, {key: [values]})."""
+    raw = git(d, "log", f"-n{n}", "--format=%x1e%h%x1f%cI%x1f%s%x1f%(trailers:only,unfold)")
+    out = []
+    for rec in raw.split("\x1e"):
+        if not rec.strip():
+            continue
+        sha, date, subj, trailers = (rec.split("\x1f") + ["", "", "", ""])[:4]
+        tr = {}
+        for line in trailers.splitlines():
+            k, _, v = line.partition(":")
+            if k.strip().lower().startswith("watchbill-"):
+                tr.setdefault(k.strip(), []).append(v.strip())
+        if tr:
+            out.append((sha.strip(), date[:16], subj, tr))
+    return out
+
+
+def open_exposures(events):
+    """verify-failed rule SHAs with no later landed fix naming them (events newest first)."""
+    fixed, open_ = set(), []
+    for sha, date, subj, tr in events:
+        evs = tr.get("Watchbill-Event", [])
+        if "landed" in evs:
+            fixed.update(v[:7] for v in tr.get("Watchbill-Fixes", []))
+        if "verify-failed" in evs:
+            for r in tr.get("Watchbill-Rule", []):
+                if r[:7] not in fixed:
+                    open_.append((r[:7], sha, date))
+    return open_
+
+
+def cycle_state(d, events):
+    closed = next((tr["Watchbill-Cycle"][0] for _, _, _, tr in events
+                   if "cycle-closed" in tr.get("Watchbill-Event", []) and tr.get("Watchbill-Cycle")), "")
+    runs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "dev-docs", "runs", "*")) if os.path.isdir(p))
+    newest = runs[-1] if runs else ""
+    if newest and newest != closed and (not closed or newest > closed):
+        has_brief = os.path.isfile(os.path.join(d, "dev-docs", "runs", newest, "briefs", "cycle.md"))
+        return f"cycle {newest} open" + (" (cycle brief written)" if has_brief else "") + \
+               (f"; last closed: {closed}" if closed else "; no cycle-closed event recorded yet")
+    if closed:
+        return f"no open cycle; last closed: {closed}"
+    return "no build cycles recorded"
+
+
+MANIFEST_GLOBS = ("*manifest*.jsonl", "runs.jsonl", "*/*manifest*.jsonl", "*/runs.jsonl",
+                  "*/*/*manifest*.jsonl", "*/*/runs.jsonl")  # e.g. searches/runs.jsonl
+
+
+def manifest_lines(d, text):
+    """(path, non-empty lines) of the run manifest: the README's, else the newest found."""
+    m = re.search(r"[Rr]un manifest:?\**\s*`?([~\w./-]+\.(?:jsonl|md|log|txt|csv))`?", text)
+    cands = []
+    if m:
+        p = os.path.expanduser(m[1])
+        cands.append(p if os.path.isabs(p) else os.path.join(d, p))
+    found = {p for g in MANIFEST_GLOBS for p in glob.glob(os.path.join(d, g))
+             if "/reference/" not in p and "/node_modules/" not in p}
+    cands += sorted(found, key=os.path.getmtime, reverse=True)
+    for p in cands:
+        if os.path.isfile(p):
+            return p, [l for l in read_text(p).splitlines() if l.strip()]
+    return "", []
+
+
+def manifest_tail(d, text):
+    p, lines = manifest_lines(d, text)
+    return p, (lines[-1] if lines else "(empty)") if p else ""
+
+
+NEEDS_FIELDS = ("needs_human",)
+
+
+def needs_human(lines):
+    """{reason class: count} from the newest manifest line that carries `needs_human`, else
+    None. The field is computed by the system's own tool
+    (paper-trails: never type a count)."""
+    for ln in reversed(lines):
+        try:
+            rec = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        field = next((f for f in NEEDS_FIELDS if isinstance(rec, dict) and f in rec), None)
+        if field:
+            v = rec[field]
+            if isinstance(v, dict):
+                return {str(k): int(n) for k, n in v.items() if isinstance(n, (int, float)) and n}
+            if isinstance(v, (int, float)):
+                return {"unclassified": int(v)} if v else {}
+            if isinstance(v, list):
+                return {"unclassified": len(v)} if v else {}
+    return None
+
+
+# --- Decisions for the human: one decisions file per system ---------------------------
+
+CRITICMARKUP = os.environ.get("WATCHBILL_CRITICMARKUP") or os.path.join(HERE, "criticmarkup.py")
+DECISION_FILES = ("dev-docs/decisions.md", "dev-docs/questions.md", "decisions.md")  # questions.md: legacy
+
+
+def human():
+    return config.get("human_name") or "the human"
+
+
+def human_cap():
+    h = human()
+    return h[:1].upper() + h[1:]
+
+
+def needs_label():
+    """'needs-human', or 'needs-<name>' when the human has a configured name."""
+    h = human()
+    return "needs-human" if h.lower() == "the human" else f"needs-{h}"
+
+
+def decisions_heading(heading):
+    """Is this README heading the decisions section ("Decisions for the human", or for the
+    configured name)?"""
+    h = heading.lower()
+    return any(f"decisions for {who}" in h for who in {"the human", human().lower()})
+MARK_OPEN = re.compile(r"\{(?:\w+=\"[^\"]*\"\s*)*(?:\+\+|--|~~|>>|==)")
+_cm = []
+
+
+def criticmarkup():
+    """criticmarkup.py loaded as a module (its parse() is what `criticmarkup.py list` uses), or None."""
+    if not _cm:
+        mod = None
+        if os.path.isfile(CRITICMARKUP):
+            try:
+                loader = importlib.machinery.SourceFileLoader("criticmarkup", CRITICMARKUP)
+                mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("criticmarkup", loader))
+                loader.exec_module(mod)
+            except Exception:
+                mod = None
+        _cm.append(mod)
+    return _cm[0]
+
+
+def resolve_marks(text, view):
+    """The text as it stands ("current": every pending suggestion unaccepted, agents' comments
+    dropped, the human's kept) or as proposed ("proposed": every suggestion accepted). None when the
+    text has marks and criticmarkup.py cannot be loaded."""
+    if not MARK_OPEN.search(text):
+        return text
+    cm = criticmarkup()
+    if not cm:
+        return None
+    out, i = [], 0
+    for mk in cm.parse(text):
+        out.append(text[i:mk["start"]])
+        i = mk["end"]
+        kind = mk["kind"]
+        if mk.get("error") == "unclosed":
+            out.append(text[mk["start"]:])
+            break
+        if kind == "addition":
+            out.append(mk.get("text", "") if view == "proposed" else "")
+        elif kind == "deletion":
+            out.append("" if view == "proposed" else mk.get("text", ""))
+        elif kind == "substitution":
+            out.append(mk.get("new", "") if view == "proposed" else mk.get("old", ""))
+        elif kind == "comment":
+            out.append("" if cm.is_agent(mk.get("author")) else mk.get("raw", ""))
+        else:  # highlight
+            out.append(mk.get("text", ""))
+    out.append(text[i:])
+    return "".join(out)
+
+
+ANSWERED = re.compile(r"\*\*(Answer|Revised[^*]*|Done)[^*]*:|\{>>.*Done", re.IGNORECASE)
+CARD = re.compile(r"^\s*(\d+)\.\s+\*\*(.+?)\*\*")
+CARD_START = re.compile(r"^\s*(?:\{(?:\w+=\"[^\"]*\"\s*)*~~\s*)?\d+\.\s+\*\*")  # a renumbering mark may lead
+
+
+def decision_cards(text):
+    """[(number, title, state)] for numbered bold-title cards; state is open, proposed (the only
+    answer is a pending suggestion), answered, or unknown (marks present, no parser)."""
+    cards, cur = [], None
+    for ln in text.splitlines():
+        if CARD_START.match(ln):
+            cur = [ln]
+            cards.append(cur)
+        elif cur is not None and (ln.startswith("   ") or ln.startswith("\t") or ln.startswith("{")
+                                  or not ln.strip()):
+            cur.append(ln)
+        elif ln.startswith("#"):
+            cur = None
+    out = []
+    for lines in cards:
+        raw = "\n".join(lines)
+        now = resolve_marks(raw, "current")
+        m = CARD.match(now if now is not None else re.sub(r"^\s*\{[^~]*~~\s*", "", raw))
+        if not m:
+            continue
+        number, title = m[1], m[2].rstrip("?.").strip()
+        if now is None:
+            state = "unknown"
+        elif ANSWERED.search(now):
+            state = "answered"
+        elif ANSWERED.search(resolve_marks(raw, "proposed") or ""):
+            state = "proposed"
+        else:
+            state = "open"
+        out.append((number, title, state))
+    return out
+
+
+def readme_decisions(text):
+    """[(n, title, state)] for list items under the README's decisions heading."""
+    out, inside, level = [], False, 0
+    for ln in text.splitlines():
+        h = re.match(r"^(#+)\s+(.*)", ln)
+        if h:
+            if inside and len(h[1]) <= level:
+                inside = False
+            if decisions_heading(h[2]):
+                inside, level = True, len(h[1])
+            continue
+        if not inside:
+            continue
+        item = re.match(r"^[-*+]\s+(.*)|^\d+[.)]\s+(.*)", ln)
+        if item:
+            body = item[1] or item[2]
+            now = resolve_marks(body, "current")
+            if now is not None and not now.strip():
+                continue  # the whole item is a pending suggestion: not the human's yet, not a decision
+            state = "unknown" if now is None else "answered" if ANSWERED.search(now) else "open"
+            title = re.sub(r"[`*_]|\{[^}]*\}", "", now if now is not None else body).strip()
+            out.append((f"R{len(out) + 1}", title[:120], state))
+    return out
+
+
+def decisions(d, readme_text):
+    """{'note': path or '', 'readme': bool, 'items': [(n, title, state)] still open for the human,
+    'unknown': [why]}. An empty note with no README section is 'no source', not 'none open'."""
+    note = next((os.path.join(d, rel) for rel in DECISION_FILES if os.path.isfile(os.path.join(d, rel))), "")
+    cards = decision_cards(read_text(note)) if note else []
+    rd = readme_decisions(readme_text)
+    has_section = any(decisions_heading(m) for m in re.findall(r"^#+\s+(.*)$", readme_text, re.MULTILINE))
+    items = [c for c in cards + rd if c[2] != "answered"]
+    unknown = []
+    if not note and not has_section:
+        unknown.append("no decisions file (dev-docs/decisions.md, or the legacy questions.md, or a README "
+                       "section 'Decisions for the human')")
+    n_unknown = sum(1 for c in items if c[2] == "unknown")
+    if n_unknown:
+        unknown.append(f"criticmarkup.py not found at {CRITICMARKUP}: {n_unknown} decision(s) carry Track "
+                       f"Changes marks and cannot be read")
+    return {"note": note, "readme": has_section, "items": [c for c in items if c[2] != "unknown"],
+            "unknown": unknown}
+
+
+def open_decisions(d):
+    """(path, [(number, title)]) for the decisions note's cards the human has not answered (an answer
+    that is only a pending suggestion is not his answer). Kept for callers of 0.2."""
+    dec = decisions(d, "")
+    return dec["note"], [(n, t) for n, t, s in dec["items"] if not n.startswith("R")]
+
+
+def trailer_check(d):
+    """The installed commit-msg check's version line, or '' when the repo has none."""
+    hooks = git(d, "rev-parse", "--path-format=absolute", "--git-path", "hooks").strip()
+    p = os.path.join(hooks, "commit-msg") if hooks else ""
+    if not p or not os.path.isfile(p):
+        return ""
+    m = re.search(r'VERSION = "([^"]+)"', read_text(p))
+    return m[1] if m else ("watchbill commit-msg" if "watchbill commit-msg" in read_text(p) else "")
+
+
+def siblings():
+    p = subprocess.run([HL_PATH, "siblings", "--all", "--json"], capture_output=True, text=True)
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return {"sessions": [], "chains": {}, "pending_relief": {}, "error": (p.stderr or p.stdout).strip()[:200]}
+
+
+HO = re.compile(r"-ho(\d+)$")
+
+
+def ho_number(name):
+    m = HO.search(name or "")
+    return int(m[1]) if m else 1
+
+
+def chain_member(base, name):
+    return name == base or bool(re.fullmatch(re.escape(base) + r"-ho\d+", name or ""))
+
+
+def live_head(name, live):
+    """The live session that holds this roster seat now: the name itself or its highest -hoN."""
+    base = HO.sub("", name)
+    cands = [n for n in live if chain_member(base, n)]
+    return max(cands, key=ho_number) if cands else ""
+
+
+def ledger_head(name, events):
+    """The newest holder of this seat the ledger knows of (a relieve moves the seat to -hoN)."""
+    base, head = HO.sub("", name), name
+    for e in events:
+        if e.get("event") == "relieve" and chain_member(base, e.get("receiver_name") or "") \
+                and ho_number(e["receiver_name"]) > ho_number(head):
+            head = e["receiver_name"]
+    return head
+
+
+def live_names():
+    return {r.get("name") for r in hl.live_registry(hl.registry()).values() if r.get("name")}
+
+
+# --- status -------------------------------------------------------------------------
+
+def gather(d, sib=None, live=None):
+    readme = os.path.join(d, "README.md")
+    text = read_text(readme) if os.path.isfile(readme) else ""
+    rows = roster(text)
+    sib = siblings() if sib is None else sib
+    live = live_names() if live is None else live
+    by_name = {s.get("claude_name"): s for s in sib.get("sessions", [])}
+    seats = []
+    for r in rows:
+        head = live_head(r["name"], live | set(by_name)) or r["name"]
+        s = by_name.get(head, {})
+        seats.append({"seat": r["seat"] or r["seat_text"], "name": r["name"], "holder": head,
+                      "alive": head in live or bool(s), "tab_label": s.get("tab_label", ""),
+                      "glyph": s.get("glyph", ""), "status": s.get("status", "")})
+    events = build_events(d)
+    dec = decisions(d, text)
+    mpath, mlines = manifest_lines(d, text)
+    nj = needs_human(mlines)
+    pending = {o: rx for o, rx in (sib.get("pending_relief") or {}).items()
+               if o in {r["name"] for r in rows} or rx in {r["name"] for r in rows}}
+    unknown = list(dec["unknown"])
+    if not rows:
+        unknown.insert(0, "no roster table in README.md")
+    if sib.get("error"):
+        unknown.append("herdr-lifecycle siblings failed")
+    if nj is None and any(r["seat"] == "steward" for r in rows):  # an inbox: needs-human items exist somewhere
+        unknown.append("no needs_human count in the run manifest" if mpath else "no run manifest found")
+    return {"system": d, "title": next((l.lstrip("# ").strip() for l in text.splitlines() if l.startswith("# ")), ""),
+            "seats": seats, "roster_found": bool(rows), "decisions_note": dec["note"],
+            "decisions_readme": dec["readme"], "open_decisions": [(n, t) for n, t, _ in dec["items"]],
+            "proposed": [n for n, _, state in dec["items"] if state == "proposed"],
+            "needs_human": nj, "unknown": unknown,
+            "run_manifest": mpath, "last_run": (mlines[-1] if mlines else "(empty)") if mpath else "",
+            "cycle": cycle_state(d, events), "trailer_check": trailer_check(d),
+            "rules_sha": rules_sha(d)[0], "landings": landings(events),
+            "exposures": open_exposures(events), "recent_build_events": events[:5], "pending_relief": pending,
+            "siblings_error": sib.get("error", "")}
+
+
+def landings(events, n=5):
+    """[(sha, date, subject, approval or '')] for the newest landed build events."""
+    return [(sha, date, subj, "; ".join(tr.get("Watchbill-Approved", [])))
+            for sha, date, subj, tr in events if "landed" in tr.get("Watchbill-Event", [])][:n]
+
+
+def ball(st):
+    """Who has the ball, from the records only. "unknown" (never "nobody") when a source is missing."""
+    for_human = []  # what waits on the human
+    if st["open_decisions"]:
+        prop = set(st.get("proposed", []))
+        for_human.append(f"{len(st['open_decisions'])} open decision(s)"
+                    + (f", {len(prop)} of them only proposed by an agent" if prop else "") + ": "
+                    + ", ".join(f"#{n}" for n, _ in st["open_decisions"][:8])
+                    + (" …" if len(st["open_decisions"]) > 8 else ""))
+    if st.get("needs_human"):
+        for_human.append(f"{sum(st['needs_human'].values())} {needs_label()} item(s) ("
+                    + ", ".join(f"{k} {v}" for k, v in sorted(st["needs_human"].items())) + ")")
+    for s in st["seats"]:
+        if s["glyph"] == "?":
+            for_human.append(f"{s['name']} stopped on {human()} ({hl.label_reason(s['tab_label']) or 'decision'})")
+        elif s["glyph"] == "✓":
+            for_human.append(f"{s['name']} waits for {human()}'s review")
+    if for_human:
+        return f"{human_cap()}: " + "; ".join(for_human) + (f" (also unknown: {'; '.join(st['unknown'])})" if st.get("unknown") else "")
+    alive = [s for s in st["seats"] if s["alive"]]
+    working = [s["name"] for s in alive if s["status"] in ("working", "busy")]
+    waiting = [s["name"] for s in st["seats"] if s["glyph"] == "⏳"]
+    if working:
+        return "seats: " + ", ".join(working) + " working" + (f"; waiting on others: {', '.join(waiting)}" if waiting else "")
+    if waiting:
+        return f"waiting on someone other than {human()}: " + ", ".join(waiting)
+    if st.get("unknown"):
+        return ("unknown: " + "; ".join(st["unknown"])
+                + ("; and no seat is running" if st["roster_found"] and not alive else ""))
+    if not alive:
+        return "no seat is running (nothing restarts one on a schedule: `watchbill restore`)"
+    return (f"nobody the records show: {len(alive)} live seat(s), none shown working "
+            f"(herdr can show idle while a seat works)")
+
+
+def render(st):
+    out = [f"{st['title'] or os.path.basename(st['system'])}  ({st['system']})",
+           f"Ball:      {ball(st)}",
+           f"Cycle:     {st['cycle']}"]
+    if st["exposures"]:
+        out.append("Exposure:  verify-failed with no landed fix yet: "
+                   + ", ".join(f"rule {r} (failed in {s})" for r, s, _ in st["exposures"]))
+    out.append(f"Last run:  {st['last_run'][:160] + ' (' + os.path.relpath(st['run_manifest'], st['system']) + ')' if st['run_manifest'] else 'no run manifest found'}")
+    if st["recent_build_events"]:
+        sha, date, subj, tr = st["recent_build_events"][0]
+        out.append(f"Last build event: {sha} {date} {', '.join(tr.get('Watchbill-Event', ['?']))} — {subj[:70]}")
+    out.append(f"Trailers:  {st['trailer_check'] + ' installed' if st['trailer_check'] else 'NO commit-msg check installed: build events go unchecked (hooks/git/install-commit-msg.sh)'}")
+    if st.get("rules_sha"):
+        out.append(f"Rules:     {st['rules_sha']} (watchbill rules-sha)")
+    if st.get("landings"):
+        out.append("Landings:  " + "; ".join(f"{sha} {date[:10]} approved: {appr or 'no approval recorded'}"
+                                              for sha, date, _, appr in st["landings"][:3]))
+    alive = sum(1 for s in st["seats"] if s["alive"])
+    out.append(f"Seats:     {alive} of {len(st['seats'])} alive" if st["roster_found"]
+               else "Seats:     no roster table in README.md (columns Seat | Agent name | Model | Effort | Start)")
+    for s in st["seats"]:
+        state = (s["glyph"] or "·") + " " + (s["status"] or ("alive" if s["alive"] else "NOT RUNNING"))
+        held = f" (held by {s['holder']})" if s.get("holder", s["name"]) != s["name"] else ""
+        out.append(f"  {s['seat'][:10]:10} {s['name'][:30]:30} {state:16} {s['tab_label'][:40]}{held}")
+    for o, rx in st["pending_relief"].items():
+        out.append(f"  relief pending: {o} owns its seat until {rx} runs relieve")
+    where = [os.path.relpath(st["decisions_note"], st["system"])] if st["decisions_note"] else []
+    where += ["the README's decisions section"] if st.get("decisions_readme") else []
+    if where:
+        out.append(f"Decisions: {', '.join(where)} ({len(st['open_decisions'])} open)")
+    if st["open_decisions"]:
+        prop = set(st.get("proposed", []))
+        for n, t in st["open_decisions"][:12]:
+            out.append(f"  #{n} {t[:80]}" + ("  (proposed by an agent, not accepted)" if n in prop else ""))
+        if len(st["open_decisions"]) > 12:
+            out.append(f"  … and {len(st['open_decisions']) - 12} more")
+    if st["siblings_error"]:
+        out.append(f"(herdr-lifecycle siblings failed: {st['siblings_error']})")
+    return "\n".join(out)
+
+
+def cmd_status(argv):
+    if not argv or argv[0].startswith("-"):
+        die("usage: watchbill status <system-dir> [--json]")
+    d = os.path.abspath(os.path.expanduser(argv[0]))
+    if not os.path.isdir(d):
+        die(f"{d} is not a directory")
+    st = gather(d)
+    print(json.dumps(st, indent=1, ensure_ascii=False) if "--json" in argv else render(st))
+
+
+# --- restore ------------------------------------------------------------------------
+
+def project_slug(path):
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(path))
+
+
+def transcript_session(name, cwd):
+    """Newest transcript (in cwd's project folder) whose latest custom title is `name`."""
+    folder = os.path.expanduser(f"~/.claude/projects/{project_slug(cwd)}")
+    best = None
+    for f in glob.glob(os.path.join(folder, "*.jsonl")):
+        title, sid = None, None
+        try:
+            with open(f, errors="replace") as fh:
+                for line in fh:
+                    if '"custom-title"' in line:
+                        try:
+                            j = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        title, sid = j.get("customTitle"), j.get("sessionId")
+        except OSError:
+            continue
+        if title == name and sid and (best is None or os.path.getmtime(f) > best[0]):
+            best = (os.path.getmtime(f), sid)
+    return best[1] if best else ""
+
+
+def resume_session(name, cwd, events):
+    r = hl.seat_row(events, "", name)
+    sid = (r or {}).get("session_id") or (r or {}).get("receiver_sid") or ""
+    return sid or transcript_session(name, cwd)
+
+
+DEFAULT_CAUSE = "a usage limit, a reboot or an account switch"
+
+
+def first_prompt(r, d, name, cause):
+    """What a restored seat is told first, so it comes back as its seat and not a blank session."""
+    brief = r.get("brief") or ""
+    if brief:
+        bp = os.path.expanduser(brief)
+        brief = bp if os.path.isabs(bp) else os.path.join(d, bp)
+    return (f"Restored by `watchbill restore` after {cause}. You are {name}, the {r['seat_text'] or r['seat']} "
+            f"seat of the system in {d}. "
+            + (f"Read your brief {brief} and the system README. " if brief else
+               f"The roster names no brief: read the system README, then ask {human()} for your brief. ")
+            + "If you resumed, your Monitor and watchers did not survive: re-arm the watcher your brief or "
+              "dev-docs/watch.md names. Then relabel your tab with `herdr-lifecycle label` (or `park` for a "
+              "parked builder) and say in one line what you picked up.")
+
+
+def plan_restore(d, rows, live, events, workspace="", cause=DEFAULT_CAUSE, stalled=None):
+    """[(name, action, argv-or-None, note)] for every roster row. stalled: live name -> the pane
+    line showing a usage limit or API error (such a seat is reported, never respawned)."""
+    subject = system_subject(rows)
+    stalled = stalled or {}
+    plan = []
+    for r in rows:
+        head = live_head(r["name"], live)
+        if head:
+            if head in stalled:
+                plan.append((head, "stalled", None, f"live but stopped: {stalled[head][:100]!r}; after the "
+                                                    f"limit resets run with --stalled to type 'continue'"))
+            else:
+                plan.append((r["name"], "skip", None, "live" + (f" as {head}" if head != r["name"] else "")
+                                                      + ": never touched"))
+            continue
+        name = ledger_head(r["name"], events)  # restore the newest holder, never a historian
+        if not r["seat"]:
+            plan.append((name, "error", None, f"unknown seat {r['seat_text']!r}"))
+            continue
+        subj = r["subject"] or subject
+        task = seat_task(r, subj) if subj else None
+        if task is None:
+            plan.append((name, "error", None, f"name does not fit seat {r['seat']} with subject {subj!r}; "
+                                              f"add a Subject column"))
+            continue
+        if not r["model"]:
+            plan.append((name, "error", None, "no model in the roster"))
+            continue
+        cwd = os.path.abspath(os.path.expanduser(r["cwd"])) if r["cwd"] else d
+        argv = [HL_PATH, "spawn", "--seat", r["seat"], "--subject", subj]
+        if task:
+            argv += ["--task", task]
+        argv += ["--model", r["model"]]
+        if r["effort"]:
+            argv += ["--effort", r["effort"]]
+        if r.get("agent"):
+            argv += ["--agent", r["agent"]]
+        if r.get("brief"):
+            bp = os.path.expanduser(r["brief"])
+            argv += ["--brief", bp if os.path.isabs(bp) else os.path.join(d, bp)]
+        argv += ["--cwd", cwd]
+        if hl.seat_name(r["seat"], subj, task) != name:  # a -hoN successor keeps its own name
+            argv += ["--name", name]
+        if workspace:
+            argv += ["--workspace", workspace]
+        row = hl.seat_row(events, "", name)
+        if row:  # keep the launcher of record; accountable follows the ledger
+            argv += ["--launched-by", row.get("launched_by") or "unrecorded",
+                     "--accountable", hl.accountable_now(events, "", name) or row.get("launched_by") or "unrecorded"]
+        else:  # launched_by is fixed: the restoring session did not launch this seat
+            argv += ["--launched-by", "unrecorded"]
+        note = "fresh" if r["start"] else "fresh (no Start column: say resume or fresh in the roster)"
+        if r["start"].startswith("resume"):
+            sid = resume_session(name, cwd, events)
+            if not sid:
+                plan.append((name, "error", None, "roster says resume but no session id was found "
+                                                  "(ledger, transcripts); change Start to fresh or resume by hand"))
+                continue
+            argv += ["--resume", sid]
+            note = f"resume {sid}"
+        argv += ["--", first_prompt(r, d, name, cause)]
+        plan.append((name, "spawn", argv, note + ("" if r.get("brief") else "; no brief in the roster")))
+    return plan
+
+
+STALL = re.compile(r"usage limit|hit your (?:usage )?limit|limit reached|limit will reset|resets? (?:at )?\d"
+                   r"|rate[ _-]?limit|API Error: ?(?:429|5\d\d)|overloaded_error|Overloaded", re.IGNORECASE)
+
+
+def stalled_seats(sessions, names, read=None):
+    """{name: matching line} for live roster sessions that are not working and whose pane's last
+    lines show a usage limit or an API error. read(pane_id) -> text; defaults to herdr pane read."""
+    def herdr_read(pane):
+        p = subprocess.run(["herdr", "pane", "read", pane, "--source", "recent", "--lines", "25"],
+                           capture_output=True, text=True, timeout=10)
+        return p.stdout if p.returncode == 0 else ""
+    read = read or herdr_read
+    out = {}
+    for s in sessions:
+        name = s.get("claude_name")
+        if name not in names or s.get("status") in ("working", "busy") or not s.get("pane_id"):
+            continue
+        try:
+            tail = [l for l in read(s["pane_id"]).splitlines() if l.strip()][-12:]
+        except (OSError, subprocess.SubprocessError):
+            continue
+        hit = next((l.strip() for l in reversed(tail) if STALL.search(l)), "")
+        if hit:
+            out[name] = hit
+    return out
+
+
+def system_label(subject):
+    """A system's workspace label from the workspace_label option ("{SUBJECT} system")."""
+    return (config.get("workspace_label") or "{SUBJECT} system").replace("{SUBJECT}", subject.upper())
+
+
+def system_workspace(rows, events=None, snap=None, reg=None):
+    """(workspace id, why) for the system: a live roster seat's, else the one the ledger last
+    spawned a roster seat into (if it still exists), else the one labelled per the workspace_label option ("<SUBJECT> system")
+    (a leading ? or glyph ignored). ("", why) when none is found."""
+    names = {r["name"] for r in rows}
+    try:
+        snap = snap or hl.snapshot()
+        reg = reg if reg is not None else hl.registry()
+    except SystemExit:
+        return "", "herdr is not reachable"
+    for a in snap.get("agents", []):
+        sid = (a.get("agent_session") or {}).get("value")
+        if reg.get(sid, {}).get("name") in names:
+            return a["workspace_id"], "a live roster seat is there"
+    ids = {w["workspace_id"]: w.get("label", "") for w in snap.get("workspaces", [])}
+    for e in reversed(events or []):
+        if e.get("event") == "spawn" and e.get("workspace_id") in ids \
+                and any(chain_member(HO.sub("", n), e.get("name") or "") for n in names):
+            return e["workspace_id"], f"the ledger last spawned {e.get('name')} there"
+    subject = system_subject(rows)
+    w = hl.workspace_by_label(snap, system_label(subject)) if subject else None
+    if w:
+        return w["workspace_id"], f"labelled {w.get('label')!r}"
+    return "", f"no workspace labelled {system_label(subject)!r}"
+
+
+def cmd_restore(argv):
+    if not argv or argv[0].startswith("-"):
+        die("usage: watchbill restore <system-dir> [--dry-run] [--workspace W] [--cause TEXT] [--stalled]")
+    d = os.path.abspath(os.path.expanduser(argv[0]))
+    readme = os.path.join(d, "README.md")
+    if not os.path.isfile(readme):
+        die(f"{readme} not found")
+    rows = roster(read_text(readme))
+    if not rows:
+        die("no roster table in README.md (columns Seat | Agent name | Model | Effort | Start)")
+    dry = "--dry-run" in argv
+    events = hl.read_ledger(hl.ledger_path())
+    live = live_names()
+    sib = siblings()
+    stalled = stalled_seats(sib.get("sessions", []), {live_head(r["name"], live) for r in rows} - {""})
+    ws, why = hl.opt(argv, "--workspace"), "given"
+    if not ws:
+        ws, why = system_workspace(rows, events)
+    plan = plan_restore(d, rows, live, events, ws, hl.opt(argv, "--cause", DEFAULT_CAUSE), stalled)
+    label = system_label(system_subject(rows))
+    if not ws and any(a == "spawn" for _, a, _, _ in plan):
+        if dry:
+            print(f"would create workspace {label!r} ({why})")
+        else:
+            res = hl.herdr("workspace", "create", "--label", label, "--cwd", d)
+            ws = (res.get("result", {}).get("workspace") or {}).get("workspace_id", "")
+            if not ws:
+                die(f"could not create workspace {label!r}: {res}")
+            print(f"created workspace {ws} {label!r}")
+            plan = plan_restore(d, rows, live, events, ws, hl.opt(argv, "--cause", DEFAULT_CAUSE), stalled)
+    elif ws:
+        print(f"workspace {ws} ({why})")
+    failed = 0
+    for name, action, cmd, note in plan:
+        if action == "stalled":
+            if "--stalled" in argv:
+                pane = next((s["pane_id"] for s in sib.get("sessions", []) if s.get("claude_name") == name), "")
+                if dry:
+                    print(f"would type 'continue' into {name} ({pane}): {note.split(';')[0]}")
+                elif pane:
+                    hl.herdr("pane", "send-text", pane, "continue")
+                    hl.herdr("pane", "send-keys", pane, "enter")
+                    print(f"nudged {name} ({pane}): typed 'continue'")
+                continue
+            print(f"stall {name}: {note}")
+            continue
+        if action != "spawn":
+            failed += action == "error"
+            print(f"{action:5} {name}: {note}")
+            continue
+        shown = cmd[1:cmd.index("--")] if "--" in cmd else cmd[1:]
+        print(f"{'would' if dry else 'spawn'} {name} ({note}): {' '.join(shown)} -- <first prompt>")
+        if not dry:
+            p = subprocess.run(cmd, capture_output=True, text=True)
+            print("      " + (p.stdout.strip() or p.stderr.strip()))
+            failed += p.returncode != 0
+    if dry:
+        print("dry run: nothing spawned. Run again without --dry-run to restore.")
+    sys.exit(1 if failed else 0)
+
+
+# --- install-links ------------------------------------------------------------------
+
+LINKED_TOOLS = ("herdr-lifecycle", "herdr-session-search", "watchbill")
+PLUGINS_FILE = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
+
+
+def installed_bin(plugins_file, pick=None):
+    """(bin dir, 'name@marketplace version') of the user-scope watchbill install, or die."""
+    try:
+        with open(plugins_file) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        die(f"cannot read {plugins_file}: {e}")
+    found = []
+    for key, entries in (data.get("plugins") or {}).items():
+        if key.split("@", 1)[0] != "watchbill" or (pick and key != pick):
+            continue
+        for e in entries if isinstance(entries, list) else [entries]:
+            if e.get("scope") == "user" and e.get("installPath"):
+                found.append((key, e))
+    if not found:
+        die(f"no user-scope watchbill install{' ' + pick if pick else ''} in {plugins_file}: "
+            "install the plugin first (claude plugin install watchbill@<marketplace>)")
+    if len(found) > 1:
+        die("more than one user-scope watchbill install: "
+            + ", ".join(k for k, _ in found) + "; pick one with --from NAME@MARKETPLACE")
+    key, e = found[0]
+    root = e["installPath"]
+    for b in (os.path.join(root, "bin"), os.path.join(root, "plugin", "bin")):
+        if os.path.isdir(b):
+            return b, f"{key} {e.get('version', '?')}"
+    die(f"{key}: no bin/ under its installPath {root} (stale entry? run `claude plugin update`)")
+
+
+def dev_bin(path):
+    root = os.path.abspath(os.path.expanduser(path))
+    for b in (os.path.join(root, "plugin", "bin"), os.path.join(root, "bin")):
+        if os.path.isfile(os.path.join(b, "watchbill")):
+            return b, f"working tree {root}"
+    die(f"--dev {path}: no plugin/bin/watchbill or bin/watchbill under it")
+
+
+def link_plan(src_bin, bin_dir):
+    """[(tool, link path, target, state)] with state ok, create, repoint, blocked or missing."""
+    plan = []
+    for tool in LINKED_TOOLS:
+        target, link = os.path.join(src_bin, tool), os.path.join(bin_dir, tool)
+        if not os.access(target, os.X_OK):
+            state = "missing"
+        elif os.path.islink(link):
+            state = "ok" if os.path.realpath(link) == os.path.realpath(target) else "repoint"
+        elif os.path.lexists(link):
+            state = "blocked"
+        else:
+            state = "create"
+        plan.append((tool, link, target, state))
+    return plan
+
+
+def cmd_install_links(argv):
+    dev = hl.opt(argv, "--dev")
+    src_bin, what = dev_bin(dev) if dev else installed_bin(
+        os.environ.get("WATCHBILL_PLUGINS_FILE") or PLUGINS_FILE, hl.opt(argv, "--from"))
+    bin_dir = os.path.abspath(os.path.expanduser(hl.opt(argv, "--bin-dir", "~/.local/bin")))
+    check, dry, force = "--check" in argv, "--dry-run" in argv, "--force" in argv
+    plan = link_plan(src_bin, bin_dir)
+    print(f"source: {src_bin} ({what})")
+    bad = 0
+    for tool, link, target, state in plan:
+        old = os.readlink(link) if os.path.islink(link) else ""
+        if state == "ok":
+            print(f"ok      {link} -> {target}")
+            continue
+        if state == "missing":
+            print(f"missing {target}: not an executable file; left {link} alone")
+            bad += 1
+            continue
+        if check or (state == "blocked" and not force):
+            why = {"repoint": f"points at {old}", "create": "does not exist",
+                   "blocked": "is a file, not a symlink" + ("" if check else " (--force replaces it)")}[state]
+            print(f"{'differs' if check else 'refused'} {link} {why}")
+            bad += 1
+            continue
+        if dry:
+            print(f"would   {link} -> {target}" + (f" (was {old})" if old else ""))
+            continue
+        os.makedirs(bin_dir, exist_ok=True)
+        tmp = f"{link}.watchbill-tmp"
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        os.symlink(target, tmp)
+        os.replace(tmp, link)  # atomic: the tool is never missing from PATH mid-switch
+        print(f"linked  {link} -> {target}" + (f" (was {old})" if old else ""))
+    if dry:
+        print("dry run: nothing changed.")
+    sys.exit(1 if bad else 0)
+
+
+# --- config -------------------------------------------------------------------------
+
+def show_value(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, list):
+        return ",".join(v)
+    return str(v)
+
+
+def cmd_config(argv):
+    keys = [a for a in argv if not a.startswith("-")]
+    bad = [k for k in keys if k not in config.OPTIONS]
+    if bad:
+        die(f"unknown option(s) {', '.join(bad)}; known: {', '.join(config.OPTIONS)}")
+    vals = config.resolve_all()
+    explain, as_json = "--explain" in argv, "--json" in argv
+    keys = keys or list(config.OPTIONS)
+    if as_json:
+        out = {k: ({"value": vals[k][0], "source": vals[k][1]} if explain else vals[k][0]) for k in keys}
+        print(json.dumps(out, indent=1, ensure_ascii=False))
+        return
+    if len(keys) == 1 and not explain:
+        print(show_value(vals[keys[0]][0]))
+        return
+    if explain:
+        pid, _, why = config.plugin_options()
+        print(f"settings file: {config.settings_file()}")
+        print(f"plugin entry:  {pid or 'none'} ({why})")
+        print("order: EVAL_WATCHBILL_<KEY>, then WATCHBILL_<KEY>, then CLAUDE_PLUGIN_OPTION_<KEY>, then the settings entry, then the default")
+    width = max(len(k) for k in keys)
+    for k in keys:
+        line = f"{k:{width}} = {show_value(vals[k][0])}"
+        print(line + (f"    [{vals[k][1]}]" if explain else ""))
+
+
+# --- rules-sha and land (R2: the builder lands between the steward's items) -----------
+
+def owners_module():
+    path = os.path.join(os.path.dirname(HERE), "hooks", "ownership_warn.py")
+    loader = importlib.machinery.SourceFileLoader("watchbill_ownership", path)
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("watchbill_ownership", loader))
+    loader.exec_module(mod)
+    return mod
+
+
+RULES_KEYS = {"builder", "build", "build-lead", "watchbill:builder", "watchbill:build-lead"}
+
+
+def rules_globs(d):
+    """(globs, why): an owners.yaml `rules:` list, else the builder's and build leads' globs;
+    (None, why) when the system has no owners file or no rules-side owner."""
+    path = os.path.join(d, "dev-docs", "owners.yaml")
+    if not os.path.isfile(path):
+        return None, "no dev-docs/owners.yaml: the whole tree"
+    try:
+        data = owners_module().load_owners_data(path)
+    except Exception as e:  # a broken owners file falls back to the whole tree, loudly
+        return None, f"cannot read dev-docs/owners.yaml ({e}): the whole tree"
+    rules = data.get("rules")
+    if rules:
+        return [str(g) for g in (rules if isinstance(rules, list) else [rules])], "owners.yaml rules:"
+    globs = []
+    for key, val in (data.get("owners") or {}).items():
+        key = str(key)
+        if key in RULES_KEYS or hl.seat_from_name(key) in ("builder", "build"):
+            globs += [str(g) for g in (val if isinstance(val, list) else [val])]
+    if not globs:
+        return None, "no builder or build-lead owner in owners.yaml: the whole tree"
+    return globs, "the builder's and build leads' paths in owners.yaml"
+
+
+def rules_sha(d, full=False):
+    """(sha, why, dirty paths). sha: the newest first-parent commit on HEAD that touched the
+    rules paths ('' when the repository has no commits)."""
+    globs, why = rules_globs(d)
+    specs = [f":(glob){g.rstrip('/') + '/**' if g.endswith('/') else g}" for g in globs] if globs else []
+    fmt = "%H" if full else "%h"
+    sha = git(d, "log", "-1", "--first-parent", f"--format={fmt}", "HEAD", "--", *specs).strip() if specs \
+        else git(d, "log", "-1", f"--format={fmt}", "HEAD").strip()
+    dirty = [l[3:] for l in git(d, "status", "--porcelain", "--", *specs).splitlines()] if specs else []
+    return sha, why, dirty
+
+
+def cmd_rules_sha(argv):
+    pos = [a for a in argv if not a.startswith("-")]
+    d = git(os.path.abspath(os.path.expanduser(pos[0] if pos else ".")), "rev-parse", "--show-toplevel").strip()
+    if not d:
+        die("not inside a git repository")
+    sha, why, dirty = rules_sha(d, "--full" in argv)
+    if dirty:
+        die(f"rules have uncommitted changes in {d} ({', '.join(dirty[:5])}"
+            + (" …" if len(dirty) > 5 else "") + "): a stamp would name rules that are not in any commit")
+    if not sha:
+        die(f"no commit touches the rules paths in {d} ({why})")
+    print(sha)
+    if "--explain" in argv:
+        print(f"from: {why}", file=sys.stderr)
+
+
+def primary_checkout(d):
+    """The repository's main working tree (the steward's), from any of its worktrees."""
+    out = git(d, "worktree", "list", "--porcelain")
+    first = next((l[len("worktree "):] for l in out.splitlines() if l.startswith("worktree ")), "")
+    return first or git(d, "rev-parse", "--show-toplevel").strip()
+
+
+def steward_state(d, rows=None, live=None, sib=None):
+    """(busy, steward name, why). Busy while the live steward's tab shows working (mid-item),
+    or when its state cannot be read. No steward, or none live: not busy."""
+    if rows is None:
+        readme = os.path.join(d, "README.md")
+        rows = roster(read_text(readme)) if os.path.isfile(readme) else []
+    stewards = [r for r in rows if r["seat"] == "steward"]
+    if not stewards:
+        return False, "", "no steward in the roster"
+    live = live_names() if live is None else live
+    heads = [h for h in (live_head(r["name"], live) for r in stewards) if h]
+    if not heads:
+        return False, "", "the steward is not live: the landed commit is its message"
+    sib = siblings() if sib is None else sib
+    if sib.get("error"):
+        return True, heads[0], f"cannot read {heads[0]}'s state (herdr-lifecycle siblings failed)"
+    status = {s.get("claude_name"): s.get("status") for s in sib.get("sessions", [])}
+    for h in heads:
+        if h not in status:
+            return True, h, f"{h} is live but not visible in herdr: its state is unknown"
+        if status[h] in ("working", "busy"):
+            return True, h, f"{h} is working (mid-item)"
+    return False, heads[0], f"{heads[0]} is between items ({status[heads[0]] or 'idle'})"
+
+
+def approval_used(d, where):
+    """The commit on HEAD's history whose Watchbill-Approved names `where` already, or ''."""
+    raw = git(d, "log", "--format=%h%x1f%(trailers:key=Watchbill-Approved,valueonly,separator=%x1d)", "HEAD")
+    for line in raw.splitlines():
+        sha, _, vals = line.partition("\x1f")
+        if where.strip() in {v.strip() for v in vals.split("\x1d") if v.strip()}:
+            return sha
+    return ""
+
+
+def opts(argv, flag):
+    return [argv[i + 1] for i, a in enumerate(argv) if a == flag and i + 1 < len(argv)]
+
+
+def land_message(branch, backfill, steward, fixes=(), approved="", cycle="", body=""):
+    lines = [f"watchbill land: merge {branch}", ""]
+    if body:
+        lines += [body.strip(), ""]
+    lines += ["Watchbill-Event: landed", f"Watchbill-Backfill: {backfill}", f"Watchbill-Steward: {steward}"]
+    lines += [f"Watchbill-Fixes: {f}" for f in fixes]
+    if approved:
+        lines.append(f"Watchbill-Approved: {approved}")
+    if cycle:
+        lines.append(f"Watchbill-Cycle: {cycle}")
+    sid = os.environ.get("CLAUDE_SESSION_ID", "")
+    if sid:  # in the block already, so a prepare-commit-msg hook that appends them stays idempotent
+        lines += [f"Claude-Session-Id: {sid}", f"Resume: claude --resume {sid}"]
+    return "\n".join(lines) + "\n"
+
+
+LAND_USAGE = ("usage: watchbill land <branch> --backfill owed|none --steward affected|unaffected|none "
+              "[--approved WHERE] [--fixes SHA]... [--cycle ID] [--message TEXT] [--system DIR] [--wait MIN] "
+              "[--dry-run]")
+
+
+def cmd_land(argv):
+    if not argv or argv[0].startswith("-"):
+        die(LAND_USAGE)
+    branch = argv[0]
+    backfill, stew = hl.opt(argv, "--backfill"), hl.opt(argv, "--steward")
+    if backfill not in ("owed", "none") or stew not in ("affected", "unaffected", "none"):
+        die("--backfill owed|none and --steward affected|unaffected|none are required\n" + LAND_USAGE)
+    top = git(os.path.abspath(os.path.expanduser(hl.opt(argv, "--system", "."))), "rev-parse", "--show-toplevel").strip()
+    if not top:
+        die("not inside a git repository (pass --system DIR)")
+    d = primary_checkout(top)
+    tip = git(d, "rev-parse", "--verify", "-q", f"{branch}^{{commit}}").strip()
+    if not tip:
+        die(f"no branch or commit {branch!r} in {d}")
+    target = git(d, "symbolic-ref", "-q", "--short", "HEAD").strip()
+    if not target:
+        die(f"{d} has a detached HEAD: check out the branch to land on first")
+    if target == branch:
+        die(f"{d} is on {branch} itself; land merges {branch} into the primary checkout's branch")
+    if subprocess.run(["git", "-C", d, "merge-base", "--is-ancestor", tip, "HEAD"]).returncode == 0:
+        die(f"{branch} is already in {target}: nothing to land")
+    if os.path.exists(git(d, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD").strip()):
+        die(f"a merge is already in progress in {d}")
+    fixes = opts(argv, "--fixes")
+    for f in fixes:
+        if not git(d, "rev-parse", "--verify", "-q", f"{f}^{{commit}}").strip():
+            die(f"--fixes {f}: no such commit")
+    approved = hl.opt(argv, "--approved", "")
+    if approved:
+        used = approval_used(d, approved)
+        if used:
+            die(f"refused: the approval {approved!r} was already used by {used}. An approval is single-use: "
+                f"get a new one for this change")
+    msg = land_message(branch, backfill, stew, fixes, approved, hl.opt(argv, "--cycle", ""), hl.opt(argv, "--message", ""))
+    wait_min = float(hl.opt(argv, "--wait", "0") or 0)
+    deadline = time.time() + wait_min * 60
+    while True:
+        busy, who, why = steward_state(d)
+        if not busy or time.time() >= deadline:
+            break
+        time.sleep(15)
+    if busy:
+        die(f"refused: {why}. Land between the steward's items: run again when its tab is idle, or with "
+            f"--wait MINUTES", 3)
+    check = trailer_check(d)
+    if "--dry-run" in argv:
+        print(f"would merge {branch} ({tip[:9]}) into {target} in {d} with --no-ff; steward: {why}")
+        print(("" if check else "warning: no watchbill commit-msg check installed in this repository\n") + msg)
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write(msg)
+        msg_file = f.name
+    try:
+        p = subprocess.run(["git", "-C", d, "merge", "--no-ff", "-F", msg_file, branch], capture_output=True, text=True)
+    finally:
+        os.unlink(msg_file)
+    if p.returncode != 0:
+        subprocess.run(["git", "-C", d, "merge", "--abort"], capture_output=True)
+        die(f"merge failed, aborted, nothing landed:\n{(p.stdout + p.stderr).strip()[-1500:]}\n"
+            f"Merge {target} into {branch} in your worktree, resolve, and land again.")
+    sha = git(d, "rev-parse", "--short", "HEAD").strip()
+    if "landed" not in git(d, "log", "-1", "--format=%(trailers:key=Watchbill-Event,valueonly)", "HEAD"):
+        print(f"WARNING: {sha} was committed but git does not read its Watchbill trailers: a commit hook added a "
+              f"paragraph after them. Install the watchbill commit-msg check (hooks/git/install-commit-msg.sh), "
+              f"which joins trailer paragraphs, and record the landing with an empty commit carrying the trailers.",
+              file=sys.stderr)
+    files = git(d, "diff", "--name-only", "HEAD^1", "HEAD").split()
+    rsha = rules_sha(d)[0]
+    print(f"landed {branch} as {sha} on {target} in {d}" + ("" if check else
+          " (warning: no watchbill commit-msg check installed here: hooks/git/install-commit-msg.sh)"))
+    print(f"rules SHA now {rsha}; steward: {why}")
+    print(f"FYI for the steward (no ack, no pause): landed {sha}, {len(files)} file(s): "
+          + ", ".join(files[:12]) + (" …" if len(files) > 12 else "")
+          + f". Adopt {rsha} between items, after your check passes.")
+
+
+# --- check-note and hold (S9: edits from other devices) -----------------------------
+
+CLOSER = re.compile(r"(\+\+|--|~~|<<|==)\}")
+
+
+def conflict_copies(path):
+    """Sibling files that look like a sync conflict copy of `path`."""
+    d, base = os.path.dirname(os.path.abspath(path)), os.path.basename(path)
+    stem, ext = os.path.splitext(base)
+    out = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return out
+    pats = [re.compile(re.escape(stem) + r" \((?:[Cc]onflicted copy|conflict)[^)]*\)" + re.escape(ext) + "$"),
+            re.compile(re.escape(stem) + r"\.sync-conflict-[^/]*" + re.escape(ext) + "$"),
+            re.compile(re.escape(stem) + r" \d+" + re.escape(ext) + "$")]
+    for n in sorted(names):
+        if n != base and any(p.match(n) for p in pats):
+            out.append(os.path.join(d, n))
+    return out
+
+
+def note_problems(path):
+    """[problem] for a note's structure: Track Changes marks balanced, no duplicated section or
+    paragraph, frontmatter once, no sync conflict copy beside it."""
+    text = read_text(path)
+    probs = []
+    line_of = lambda i: text.count("\n", 0, i) + 1  # noqa: E731
+    if MARK_OPEN.search(text) or CLOSER.search(text):
+        cm = criticmarkup()
+        if not cm:
+            probs.append(f"cannot check Track Changes marks: criticmarkup.py not found at {CRITICMARKUP}")
+        else:
+            spans = []
+            for mk in cm.parse(text):
+                spans.append((mk["start"], mk["end"]))
+                if mk.get("error"):
+                    probs.append(f"line {line_of(mk['start'])}: {mk['kind']} mark {mk['error']}")
+            for m in CLOSER.finditer(text):
+                if not any(a <= m.start() < b for a, b in spans):
+                    probs.append(f"line {line_of(m.start())}: stray closing mark {m.group(0)!r}")
+    # frontmatter twice
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end > 0 and re.match(r"---\n(?:[\w-]+:.*\n)+---\n", text[end + 5:].lstrip("\n")):
+            probs.append(f"line {line_of(end + 5)}: a second frontmatter block follows the first")
+    # duplicated headings under one parent, and duplicated long paragraphs
+    stack, seen = [], {}
+    for i, ln in enumerate(text.splitlines(), 1):
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", ln)
+        if not m:
+            continue
+        level = len(m[1])
+        stack = [h for h in stack if h[0] < level]
+        key = (tuple(h[1] for h in stack), level, m[2].strip().lower())
+        if key in seen:
+            probs.append(f"line {i}: heading {m[2].strip()!r} appears twice under the same parent "
+                         f"(first at line {seen[key]})")
+        else:
+            seen[key] = i
+        stack.append((level, m[2].strip().lower()))
+    paras, start = {}, 1
+    for block in re.split(r"\n\s*\n", text):
+        norm = " ".join(block.split())
+        if len(norm) >= 80 and not norm.startswith("|"):
+            if norm in paras:
+                probs.append(f"line {start}: a paragraph repeats verbatim (first at line {paras[norm]})")
+            else:
+                paras[norm] = start
+        start += block.count("\n") + 2
+    for c in conflict_copies(path):
+        probs.append(f"conflict copy beside the note: {os.path.basename(c)}")
+    return probs
+
+
+def cmd_check_note(argv):
+    files = [a for a in argv if not a.startswith("-")]
+    if not files:
+        die("usage: watchbill check-note <file>... [--json]")
+    report, bad = {}, 0
+    for f in files:
+        if not os.path.isfile(f):
+            die(f"{f} is not a file")
+        probs = note_problems(f)
+        h = hold.hold_for(f)
+        report[f] = {"problems": probs, "hold": h}
+        bad += bool(probs)
+    if "--json" in argv:
+        print(json.dumps(report, indent=1, ensure_ascii=False))
+    else:
+        for f, r in report.items():
+            print(f"{f}: " + ("ok" if not r["problems"] else f"{len(r['problems'])} problem(s)"))
+            for pr in r["problems"]:
+                print(f"  {pr}")
+            if r["hold"]:
+                print(f"  hold switch on: {hold.describe(r['hold'])} (no writer may change it)")
+        if bad:
+            print(f"Do not write: ask {human()} to reconcile the note first.")
+    sys.exit(1 if bad else 0)
+
+
+def cmd_hold(argv):
+    pos = [a for a in argv if not a.startswith("-")]
+    h = hold.hold_for(pos[0] if pos else ".")
+    if h:
+        print(f"on: {hold.describe(h)}")
+    else:
+        print(f"off: no {' or '.join(hold.HOLD_NAMES)} between {os.path.abspath(pos[0] if pos else '.')} and its "
+              f"vault or repository root")
+    sys.exit(4 if h else 0)
+
+
+# --- context (Q37: the cost band beside the hard handoff line) ----------------------
+
+def find_transcript(sid):
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    hits = glob.glob(os.path.join(base, "projects", "*", f"{sid}.jsonl"))
+    return max(hits, key=os.path.getmtime) if hits else ""
+
+
+def context_tokens(transcript, tail_bytes=4_000_000):
+    """(tokens, model) of the newest main-thread assistant turn: the context it was sent with plus
+    its output. (0, '') when the transcript has no usage yet."""
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return 0, ""
+    for ln in reversed(lines):
+        if '"usage"' not in ln:
+            continue
+        try:
+            e = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        msg = e.get("message") if isinstance(e, dict) else None
+        if e.get("isSidechain") or not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+            continue
+        u = msg["usage"]
+        n = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                              "cache_read_input_tokens", "output_tokens"))
+        if n:
+            return n, msg.get("model", "")
+    return 0, ""
+
+
+def context_verdict(tokens, window=None, offer=None, hard=None):
+    """(code, verdict, percent): 0 ok, 1 offer a handoff (cost band), 2 hand off (hard line)."""
+    window = window or config.get("context_window_tokens")
+    offer = offer or config.get("handoff_offer_tokens")
+    hard = hard or config.get("handoff_hard_percent")
+    pct = 100.0 * tokens / window if window else 0.0
+    if pct >= hard:
+        return 2, "hand off", pct
+    if tokens >= offer:
+        return 1, "offer a handoff", pct
+    return 0, "ok", pct
+
+
+def cmd_context(argv):
+    path = hl.opt(argv, "--transcript")
+    if not path:
+        sid = hl.opt(argv, "--session") or hl.my_session_id() or die("cannot find this session (pass --session)")
+        path = find_transcript(sid) or die(f"no transcript for session {sid}")
+    tokens, model = context_tokens(path)
+    code, verdict, pct = context_verdict(tokens)
+    out = {"tokens": tokens, "percent": round(pct, 1), "verdict": verdict, "model": model,
+           "offer_at": config.get("handoff_offer_tokens"), "hard_percent": config.get("handoff_hard_percent"),
+           "window": config.get("context_window_tokens")}
+    if "--json" in argv:
+        print(json.dumps(out))
+    else:
+        tail = {0: "", 1: f": offer {human()} a handoff now (cost band, {out['offer_at']:,} tokens)",
+                2: f": hand off now ({out['hard_percent']} % is the hard line)"}[code]
+        print(f"{tokens:,} tokens, {pct:.0f} % of {out['window']:,}: {verdict}{tail}")
+    sys.exit(code)
+
+
+CMDS = {"status": cmd_status, "restore": cmd_restore, "install-links": cmd_install_links,
+        "config": cmd_config, "rules-sha": cmd_rules_sha, "land": cmd_land, "check-note": cmd_check_note,
+        "hold": cmd_hold, "context": cmd_context}
+
+if __name__ == "__main__":
+    if os.path.basename(sys.argv[0]) == "watchbill-status":
+        cmd_status(sys.argv[1:])
+    elif len(sys.argv) < 2 or sys.argv[1] not in CMDS:
+        print(__doc__)
+        sys.exit(0 if len(sys.argv) < 2 else 2)
+    else:
+        CMDS[sys.argv[1]](sys.argv[2:])

@@ -1,0 +1,35 @@
+{
+  "description": "watchbill: session context and seat primer (SessionStart), the context band (UserPromptSubmit), the human's hold switch (denies writes), the ownership warning (WARN mode) and the model guard (forbidden_models, require_explicit_model). Outside a watchbill system only the hold switch acts, and only where a hold file exists.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session_context.py\"", "timeout": 15 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/context_band.py\"", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/hold_guard.py\"", "timeout": 10 },
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/ownership_warn.py\"", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "Agent|Task|Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/model_guard.py\"", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

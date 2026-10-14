@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""watchbill commit-msg hook (council S2): build events are commit trailers.
+
+Installed per system repository by hooks/git/install-commit-msg.sh. It checks every
+Watchbill-* trailer and rejects the commit (exit 1) when one is malformed. If a
+commit-msg.local hook sits beside this one (an earlier hook kept by --chain), it runs
+first.
+
+Trailer paragraphs are joined first: when the message ends in two or more paragraphs
+made only of known trailers (Watchbill-*, Claude-Session-Id, Resume, Co-Authored-By,
+Signed-off-by), the hook rewrites the message file with them as one final block. That
+is the shape a global prepare-commit-msg hook produces when it appends the
+session trailers as their own paragraph, and the harness's Co-Authored-By line.
+
+An event is required (a commit without one is rejected) when the commit merges a
+branch named build/* (MERGE_HEAD is a build branch's tip): that merge is a landing,
+so it carries `Watchbill-Event: landed`. A commit with no Watchbill-* lines otherwise
+passes untouched.
+
+Trailers (in the final trailer block, one per line):
+  Watchbill-Event: landed | backfilled | verified | verify-failed | cycle-closed
+  Watchbill-Rule: <sha>         the landed rule commit this event is about
+  Watchbill-Fixes: <sha>        on a landed fix: the rule commit it repairs (closes
+                                the exposure window opened by verify-failed); may repeat
+  Watchbill-Approved: <where>   on a landing: where the human's approval of this change
+                                is recorded (a decisions-file card, a message); written
+                                by `watchbill land --approved`, which refuses a reused one
+  Watchbill-Backfill: owed | none
+  Watchbill-Steward: affected | unaffected | none
+  Watchbill-Cycle: <cycle id>   e.g. 2026-10-13-v02
+
+Required per event:
+  landed         Watchbill-Backfill and Watchbill-Steward
+  backfilled     Watchbill-Rule
+  verified       Watchbill-Rule
+  verify-failed  Watchbill-Rule (the exposure window starts there)
+  cycle-closed   Watchbill-Cycle
+An event with no file change is an empty commit (git commit --allow-empty).
+"""
+import os
+import re
+import subprocess
+import sys
+
+VERSION = "watchbill commit-msg 0.3"
+EVENTS = {"landed", "backfilled", "verified", "verify-failed", "cycle-closed"}
+VALUES = {
+    "Watchbill-Backfill": {"owed", "none"},
+    "Watchbill-Steward": {"affected", "unaffected", "none"},
+}
+SHA_KEYS = {"Watchbill-Rule", "Watchbill-Fixes"}
+KNOWN = {"Watchbill-Event", "Watchbill-Cycle", "Watchbill-Approved"} | set(VALUES) | SHA_KEYS
+REPEATABLE = {"Watchbill-Event", "Watchbill-Fixes"}
+REQUIRED = {
+    "landed": ["Watchbill-Backfill", "Watchbill-Steward"],
+    "backfilled": ["Watchbill-Rule"],
+    "verified": ["Watchbill-Rule"],
+    "verify-failed": ["Watchbill-Rule"],
+    "cycle-closed": ["Watchbill-Cycle"],
+}
+LOOKS_LIKE = re.compile(r"^\s*(watchbill[-_][\w-]*)\s*:\s*(.*)$", re.IGNORECASE)
+TRAILER_LINE = re.compile(r"^([A-Za-z][\w-]*)\s*:\s*\S")
+JOINABLE = {"claude-session-id", "resume", "co-authored-by", "signed-off-by"}
+CYCLE_ID = re.compile(r"^[\w.-]+$")
+SHA = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def comment_char():
+    out = subprocess.run(["git", "config", "core.commentChar"], capture_output=True, text=True)
+    value = out.stdout.strip()
+    return value if value and value != "auto" else "#"
+
+
+def split_message(message, char):
+    """(body lines, tail lines): the tail is the comment lines and anything from the scissors on."""
+    body, tail, cut = [], [], False
+    for line in message.splitlines():
+        cut = cut or line.startswith(">8") or "------------------------ >8" in line
+        (tail if cut or line.startswith(char) else body).append(line)
+    return body, tail
+
+
+def joinable(paragraph):
+    """A paragraph made only of known trailer lines (continuation lines allowed)."""
+    keys = [TRAILER_LINE.match(l) for l in paragraph if l.strip() and not l[:1].isspace()]
+    return bool(keys) and all(k and (k.group(1).lower().startswith("watchbill-") or k.group(1).lower() in JOINABLE)
+                              for k in keys)
+
+
+def join_trailer_paragraphs(body):
+    """Body lines with trailing trailer-only paragraphs joined into one block, and whether it changed."""
+    paragraphs, cur = [], []
+    for line in body:
+        if line.strip():
+            cur.append(line)
+        elif cur:
+            paragraphs.append(cur)
+            cur = []
+    if cur:
+        paragraphs.append(cur)
+    n = 0
+    while n < len(paragraphs) - 1 and joinable(paragraphs[-1 - n]):  # never the subject paragraph
+        n += 1
+    if n < 2:
+        return body, False
+    merged = [l for p in paragraphs[-n:] for l in p]
+    out = []
+    for p in paragraphs[:-n]:
+        out += p + [""]
+    return out + merged, True
+
+
+def build_merge():
+    """The build/* branch this commit merges, or '' (not a merge, or not of a build branch)."""
+    head = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], capture_output=True, text=True)
+    if head.returncode != 0 or not head.stdout.strip():
+        return ""
+    refs = subprocess.run(["git", "for-each-ref", "--points-at", head.stdout.strip(), "--format=%(refname:short)",
+                           "refs/heads/build/"], capture_output=True, text=True).stdout.split()
+    return refs[0] if refs else ""
+
+
+def check(message, sha_exists, merging=""):
+    """Return a list of error strings for one commit message. merging: the build/* branch this
+    commit merges ('' for none); such a commit is a landing and must say so."""
+    char = comment_char()
+    lines, _ = split_message(message, char)
+    lines, _ = join_trailer_paragraphs(lines)
+    text = "\n".join(lines).strip("\n") + "\n"
+    parsed = subprocess.run(["git", "interpret-trailers", "--parse"], input=text,
+                            capture_output=True, text=True).stdout.splitlines()
+    trailers = []
+    for line in parsed:
+        key, _, value = line.partition(":")
+        trailers.append((key.strip(), value.strip()))
+
+    errors = []
+    trailer_lines = {f"{k}: {v}" for k, v in trailers}
+    for line in lines:
+        match = LOOKS_LIKE.match(line)
+        if match and f"{match.group(1).strip()}: {match.group(2).strip()}" not in trailer_lines:
+            errors.append(f"'{line.strip()}' is not in the final trailer block. Put every trailer in one "
+                          "last paragraph (Watchbill-*, Claude-Session-Id, Resume, Co-Authored-By); "
+                          "prose after the trailers splits the block")
+
+    found = {}
+    for key, value in trailers:
+        if not key.lower().startswith("watchbill"):
+            continue
+        if key not in KNOWN:
+            near = [k for k in KNOWN if k.lower() == key.lower()]
+            hint = f" (spell it {near[0]})" if near else f" (known: {', '.join(sorted(KNOWN))})"
+            errors.append(f"unknown trailer {key}{hint}")
+            continue
+        found.setdefault(key, []).append(value)
+        if key == "Watchbill-Event" and value not in EVENTS:
+            errors.append(f"Watchbill-Event: '{value}' is not one of {', '.join(sorted(EVENTS))}")
+        elif key in VALUES and value not in VALUES[key]:
+            errors.append(f"{key}: '{value}' is not one of {', '.join(sorted(VALUES[key]))}")
+        elif key in SHA_KEYS:
+            if not SHA.match(value):
+                errors.append(f"{key}: '{value}' is not a commit SHA (7 to 40 lowercase hex)")
+            elif not sha_exists(value):
+                errors.append(f"{key}: {value} is not a commit in this repository")
+        elif key == "Watchbill-Cycle" and not CYCLE_ID.match(value):
+            errors.append(f"Watchbill-Cycle: '{value}' must be one token (letters, digits, . _ -)")
+        elif key == "Watchbill-Approved" and not value:
+            errors.append("Watchbill-Approved: name where the approval is recorded")
+
+    for key in found:
+        if key not in REPEATABLE and len(found[key]) > 1:
+            errors.append(f"{key} appears {len(found[key])} times; give it once")
+    events = found.get("Watchbill-Event", [])
+    if found and not events:
+        errors.append("Watchbill-* trailers without a Watchbill-Event trailer")
+    if merging and "landed" not in events:
+        errors.append(f"this commit merges {merging}, which is a landing: add `Watchbill-Event: landed` with "
+                      "Watchbill-Backfill and Watchbill-Steward in the final trailer block")
+    if "Watchbill-Approved" in found and "landed" not in events:
+        errors.append("Watchbill-Approved belongs on a landing (Watchbill-Event: landed)")
+    for event in events:
+        for needed in REQUIRED.get(event, []):
+            if needed not in found:
+                errors.append(f"Watchbill-Event: {event} needs a {needed} trailer")
+    return errors
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] == "--version":
+        print(VERSION)
+        return 0
+    if len(argv) < 2:
+        print("usage: commit-msg <message-file>", file=sys.stderr)
+        return 2
+    local = os.path.join(os.path.dirname(os.path.abspath(argv[0])), "commit-msg.local")
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        result = subprocess.run([local, *argv[1:]])
+        if result.returncode != 0:
+            return result.returncode
+    with open(argv[1], encoding="utf-8") as handle:
+        message = handle.read()
+    body, tail = split_message(message, comment_char())
+    joined, changed = join_trailer_paragraphs(body)
+    if changed:  # one trailer block, as git and `watchbill status` read it
+        message = "\n".join(joined).rstrip("\n") + "\n" + ("\n".join(tail) + "\n" if tail else "")
+        with open(argv[1], "w", encoding="utf-8") as handle:
+            handle.write(message)
+
+    def sha_exists(sha):
+        return subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+                              capture_output=True).returncode == 0
+
+    errors = check(message, sha_exists, build_merge())
+    if errors:
+        print("watchbill commit-msg: commit rejected, build-event trailers are malformed:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        print("  Spec: Watchbill-Event: landed|backfilled|verified|verify-failed|cycle-closed "
+              "(see the watchbill:builder skill).", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

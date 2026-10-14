@@ -1,0 +1,121 @@
+{
+  "name": "watchbill",
+  "version": "0.3.2",
+  "description": "A role model for multi-agent work in herdr with a human in the loop: builder and steward side by side, build and run leads, pinned crew sub-types, a delegation layer for launching and closing delegates, an editor for collaborative drafting, two-party handoff with historians, paper-trail rules and the watcher contract. One seat changes the rules, another runs the work, and every relief leaves a log.",
+  "author": {
+    "name": "John Randall",
+    "url": "https://github.com/johntrandall"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "roles",
+    "herdr",
+    "handoff",
+    "orchestration"
+  ],
+  "userConfig": {
+    "human_name": {
+      "type": "string",
+      "title": "Human's name",
+      "description": "How seats name the human in the loop in messages and status lines. Default: the human.",
+      "default": "the human"
+    },
+    "forbidden_models": {
+      "type": "string",
+      "title": "Forbidden models",
+      "description": "Models no seat may spawn or launch (for example one your plan cannot afford). The model guard denies them and spawn refuses them. Default: none.",
+      "multiple": true,
+      "default": []
+    },
+    "require_explicit_model": {
+      "type": "boolean",
+      "title": "Require an explicit model",
+      "description": "Remind a seat when a generic Agent call names no model, so no delegate silently gets the session's default.",
+      "default": true
+    },
+    "alert_channels": {
+      "type": "string",
+      "title": "Alert channels",
+      "description": "How a seat stopped on the human gets their attention, in order. Default: tab glyph only.",
+      "default": "tab glyph only"
+    },
+    "decision_channels": {
+      "type": "string",
+      "title": "Decision channels",
+      "description": "Where the human gives decisions (for example chat, Track Changes notes, boards). A system's brief names its channels from this list. Default: chat.",
+      "default": "chat"
+    },
+    "drafting_tool": {
+      "type": "string",
+      "title": "Drafting tool",
+      "description": "The Track Changes command line tool the editor and checkers use. Empty: the copy bundled in this plugin's bin/.",
+      "default": ""
+    },
+    "drafting_author": {
+      "type": "string",
+      "title": "Drafting author",
+      "description": "The author name the human's Track Changes marks carry. Empty: the human's name.",
+      "default": ""
+    },
+    "headroom_command": {
+      "type": "string",
+      "title": "Headroom command",
+      "description": "A command spawn runs first to check the machine has room for another session; a non-zero exit refuses the spawn. Empty: no check.",
+      "default": ""
+    },
+    "scheduler": {
+      "type": "string",
+      "title": "Scheduler",
+      "description": "The scheduler that may restart or wake a seat, and its state. Default: none, meaning nothing restarts a seat that closes.",
+      "default": "none"
+    },
+    "infra_home": {
+      "type": "directory",
+      "title": "Infrastructure home",
+      "description": "The project folder a fault outside a system's subject (a server, a config, a token store) is handed to. Empty: the fault goes to the human.",
+      "default": ""
+    },
+    "workspace_label": {
+      "type": "string",
+      "title": "Workspace label",
+      "description": "The herdr workspace label for a system; {SUBJECT} is replaced by the subject in capitals.",
+      "default": "{SUBJECT} system"
+    },
+    "overlay_file": {
+      "type": "file",
+      "title": "Overlay file",
+      "description": "A private markdown file of your own rules, printed into every session's context at start. Empty: none.",
+      "default": ""
+    },
+    "relief_deadline_minutes": {
+      "type": "number",
+      "title": "Relief deadline (minutes)",
+      "description": "How long either side of a two-party relief waits for the other before `relief-check` lets the receiver take over (origin gone) or marks the seat stopped on the human.",
+      "min": 1,
+      "default": 30
+    },
+    "handoff_offer_tokens": {
+      "type": "number",
+      "title": "Handoff offer band (tokens)",
+      "description": "Context size at which a seat offers the human a handoff, for cost. The hard line stays handoff_hard_percent.",
+      "min": 1,
+      "default": 400000
+    },
+    "handoff_hard_percent": {
+      "type": "number",
+      "title": "Hard handoff line (percent)",
+      "description": "Percent of the context window at which a seat hands off.",
+      "min": 1,
+      "max": 100,
+      "default": 85
+    },
+    "context_window_tokens": {
+      "type": "number",
+      "title": "Context window (tokens)",
+      "description": "The context window size the percentages are taken of.",
+      "min": 1,
+      "default": 1000000
+    }
+  }
+}

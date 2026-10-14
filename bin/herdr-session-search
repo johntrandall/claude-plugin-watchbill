@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""herdr-session-search — search Claude Code session transcripts, scoped to the
+live herdr pane roster.
+
+herdr itself has no search. It knows which agents are open (pane, tab, workspace,
+cwd, title, status) but keeps only a 1000-line readable scrollback per pane and
+does not index anything. The session HISTORY lives in the Claude Code transcript
+store at ~/.claude/projects/<project-slug>/<session-id>.jsonl.
+
+This tool joins the two: it takes herdr's live roster, resolves each pane to its
+transcript file, and greps across only those transcripts -- so "search the open
+tabs" becomes a real operation.
+
+Session-id resolution runs in three tiers, and every row is labelled with the
+tier that produced it:
+
+  herdr    herdr's own agent_session.value. Authoritative.
+  argv     A session UUID read positionally out of the claude process argv --
+           the `--resume <uuid>` operand, or the <uuid> segment of a
+           per-session scratchpad path. Authoritative.
+  content  No id available: a distinctive phrase lifted from the pane's own
+           scrollback is matched against the transcripts in the pane's
+           project-slug directory. A single hit is a real identification.
+  mtime    Nothing else worked: the most recently modified unclaimed transcript
+           in that directory. A GUESS -- flagged in every view, never silently
+           promoted. Where several agents share a working directory this tier
+           is frequently WRONG; treat its rows as leads, not facts.
+
+Usage:
+  herdr-session-search <pattern>            search transcripts of open panes
+  herdr-session-search <pattern> --all      search the whole transcript store
+  herdr-session-search --roster             print the pane -> transcript map
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+)
+# A per-session scratchpad path: /private/tmp/claude-<uid>/<slug>/<session-uuid>/...
+SCRATCHPAD_RE = re.compile(
+    r"/tmp/claude-\d+/[^/]+/"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/",
+    re.I,
+)
+
+
+def find_searcher() -> tuple[str, bool]:
+    """Locate a grep. Returns (path, is_ripgrep).
+
+    ripgrep searches this corpus in well under a second; BSD grep takes ~20s for
+    the same sweep. ripgrep is not installed system-wide here, so we also look
+    for the copy vendored inside any Claude Code npm package before settling for
+    /usr/bin/grep.
+    """
+    found = shutil.which("rg")
+    if found:
+        return found, True
+
+    machine = "arm64-darwin" if os.uname().machine == "arm64" else "x64-darwin"
+    for root in ("/opt/homebrew/lib/node_modules", "/usr/local/lib/node_modules"):
+        pattern = f"*/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/{machine}/rg"
+        for candidate in Path(root).glob(pattern):
+            if os.access(candidate, os.X_OK):
+                return str(candidate), True
+
+    return "/usr/bin/grep", False
+
+
+SEARCHER, SEARCHER_IS_RIPGREP = find_searcher()
+
+
+def herdr(*args: str) -> dict:
+    """Run a herdr CLI command and return its parsed `result` payload."""
+    proc = subprocess.run(
+        ["herdr", *args], capture_output=True, text=True, timeout=30
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"herdr {' '.join(args)}: {proc.stderr.strip()}")
+    return json.loads(proc.stdout).get("result", {})
+
+
+def project_slug(cwd: str) -> str:
+    """Claude Code's transcript directory name for a working directory."""
+    return cwd.replace("/", "-")
+
+
+def session_id_from_argv(argv: list[str]) -> str | None:
+    """Pull a session UUID out of a claude argv, positionally only.
+
+    Never grep the whole command line for a UUID shape: prompt text and
+    attribution trailers routinely carry `--resume <uuid>` as DATA, which makes
+    a naive grep attribute one session's transcript to another pane.
+    """
+    for index, token in enumerate(argv):
+        if token == "--resume" and index + 1 < len(argv):
+            candidate = argv[index + 1]
+            if UUID_RE.match(candidate):
+                return candidate.lower()
+    for token in argv:
+        match = SCRATCHPAD_RE.search(token)
+        if match:
+            return match.group(1).lower()
+    return None
+
+
+def pane_claude_process(pane_id: str) -> tuple[int, list[str]] | None:
+    """Return (pid, argv) of the claude process running in a pane, if any."""
+    try:
+        info = herdr("pane", "process-info", "--pane", pane_id)
+    except Exception:
+        return None
+    for process in info.get("process_info", {}).get("foreground_processes", []):
+        if process.get("name") == "claude" or process.get("argv0") == "claude":
+            return process.get("pid"), process.get("argv") or []
+    return None
+
+
+def transcript_path(session_id: str) -> Path | None:
+    """Locate a transcript by session id across all project directories."""
+    matches = list(PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
+    return matches[0] if matches else None
+
+
+def subagent_transcripts(transcript: Path) -> list[Path]:
+    """Transcripts of the subagents a session spawned.
+
+    Claude Code files these under `<project>/<session-id>/subagents/`. They hold
+    a large share of the actual work -- a search that skips them misses whatever
+    was delegated.
+    """
+    directory = transcript.parent / transcript.stem / "subagents"
+    return sorted(directory.glob("*.jsonl")) if directory.is_dir() else []
+
+
+CHROME_RE = re.compile(r"^[\s\-\u2500-\u257f\u2022*=_.#>\|]*$")
+PHRASE_RE = re.compile(r"[A-Za-z][A-Za-z0-9 ,.:/_'-]{44,110}")
+
+
+def own_transcript() -> Path | None:
+    """This session's own transcript, which must never be matched against.
+
+    Reading a pane echoes its text into our context and therefore into our own
+    transcript, so without this exclusion every content probe self-matches.
+    """
+    session_id = os.environ.get("CLAUDE_SESSION_ID")
+    return transcript_path(session_id) if session_id else None
+
+
+def scrollback_phrases(pane_id: str, wanted: int = 6) -> list[str]:
+    """Distinctive phrases from a pane's visible scrollback, newest first."""
+    try:
+        proc = subprocess.run(
+            ["herdr", "pane", "read", pane_id, "--source", "recent", "--lines", "400"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except Exception:
+        return []
+
+    phrases: list[str] = []
+    for line in reversed(proc.stdout.splitlines()):
+        if CHROME_RE.match(line):
+            continue
+        for match in PHRASE_RE.findall(line):
+            phrase = " ".join(match.split())
+            # Long runs of one character are box-drawing or padding, not prose.
+            if len(set(phrase.replace(" ", ""))) < 12:
+                continue
+            phrases.append(phrase)
+            if len(phrases) >= wanted:
+                return phrases
+    return phrases
+
+
+def match_by_content(pane_id: str, cwd: str, exclude: set[Path]) -> Path | None:
+    """Identify a pane's transcript by grepping its own scrollback text.
+
+    Scoped to the pane's project-slug directory: a phrase can legitimately recur
+    across projects, but within one directory a long verbatim run is effectively
+    a fingerprint. Only an unambiguous single hit is accepted.
+    """
+    directory = PROJECTS_DIR / project_slug(cwd)
+    if not directory.is_dir():
+        return None
+
+    for phrase in scrollback_phrases(pane_id):
+        if SEARCHER_IS_RIPGREP:
+            command = [SEARCHER, "-l", "--no-messages", "-F", "--", phrase, str(directory)]
+        else:
+            command = [SEARCHER, "-rlF", "--include=*.jsonl", "--", phrase, str(directory)]
+        proc = subprocess.run(command, capture_output=True, text=True)
+        hits = [
+            Path(line)
+            for line in proc.stdout.splitlines()
+            if line.endswith(".jsonl") and Path(line) not in exclude
+        ]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
+def build_roster(resolve_processes: bool = True) -> list[dict]:
+    """Join herdr's live agent roster to the Claude transcript store."""
+    snapshot = herdr("api", "snapshot")["snapshot"]
+    tab_labels = {tab["tab_id"]: tab.get("label", "") for tab in snapshot["tabs"]}
+
+    rows = []
+    for agent in snapshot["agents"]:
+        rows.append(
+            {
+                "pane_id": agent["pane_id"],
+                "tab_id": agent.get("tab_id", ""),
+                "tab_label": tab_labels.get(agent.get("tab_id", ""), ""),
+                "workspace_id": agent.get("workspace_id", ""),
+                "cwd": agent.get("cwd", ""),
+                "title": agent.get("terminal_title_stripped", ""),
+                "status": agent.get("agent_status", ""),
+                "name": agent.get("name", ""),
+                "session_id": (agent.get("agent_session") or {}).get("value"),
+                "source": "herdr" if agent.get("agent_session") else None,
+                "pid": None,
+            }
+        )
+
+    # Tier 2: read the claude argv for panes herdr could not identify.
+    if resolve_processes:
+        unresolved = [row for row in rows if not row["session_id"]]
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            results = pool.map(
+                lambda row: pane_claude_process(row["pane_id"]), unresolved
+            )
+        for row, found in zip(unresolved, results):
+            if not found:
+                continue
+            pid, argv = found
+            row["pid"] = pid
+            session_id = session_id_from_argv(argv)
+            if session_id:
+                row["session_id"] = session_id
+                row["source"] = "argv"
+
+    # Resolve transcripts for everything identified so far, so the mtime
+    # fallback can avoid stealing a file that is already spoken for.
+    claimed: set[Path] = set()
+    for row in rows:
+        if row["session_id"]:
+            path = transcript_path(row["session_id"])
+            row["transcript"] = path
+            if path:
+                claimed.add(path)
+        else:
+            row["transcript"] = None
+
+    mine = own_transcript()
+    if mine:
+        claimed.add(mine)
+
+    # Tier 3: fingerprint each remaining pane by its own scrollback text.
+    pending = [row for row in rows if not row["transcript"] and row["cwd"]]
+    if resolve_processes and pending:
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            found = pool.map(
+                lambda row: match_by_content(row["pane_id"], row["cwd"], claimed),
+                pending,
+            )
+        for row, path in zip(pending, found):
+            if path and path not in claimed:
+                row["transcript"] = path
+                row["session_id"] = path.stem
+                row["source"] = "content"
+                claimed.add(path)
+
+    # Tier 4: last resort -- directory + recency. This is a guess, and where
+    # several agents share a working directory it is frequently wrong.
+    for row in rows:
+        if row["transcript"] or not row["cwd"]:
+            continue
+        directory = PROJECTS_DIR / project_slug(row["cwd"])
+        if not directory.is_dir():
+            continue
+        candidates = [
+            path for path in directory.glob("*.jsonl") if path not in claimed
+        ]
+        if not candidates:
+            continue
+        best = max(candidates, key=lambda path: path.stat().st_mtime)
+        row["transcript"] = best
+        row["session_id"] = best.stem
+        row["source"] = "mtime"
+        claimed.add(best)
+
+    return rows
+
+
+def search(paths: list[Path], pattern: str, ignore_case: bool) -> dict[Path, int]:
+    """Count matches per transcript using ripgrep."""
+    if not paths:
+        return {}
+    if SEARCHER_IS_RIPGREP:
+        command = [SEARCHER, "--count-matches", "--no-messages"]
+    else:
+        command = [SEARCHER, "-c", "-E"]
+    if ignore_case:
+        command.append("--ignore-case" if SEARCHER_IS_RIPGREP else "-i")
+    command += ["--", pattern]
+    command += [str(path) for path in paths]
+    proc = subprocess.run(command, capture_output=True, text=True)
+    counts: dict[Path, int] = {}
+    for line in proc.stdout.splitlines():
+        path_text, _, count = line.rpartition(":")
+        if path_text and count.isdigit() and int(count) > 0:
+            counts[Path(path_text)] = int(count)
+    return counts
+
+
+def excerpt(path: Path, pattern: str, ignore_case: bool, limit: int) -> list[str]:
+    """Pull a few human-readable matching lines out of a transcript."""
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error:
+        regex = re.compile(re.escape(pattern), flags)
+
+    lines: list[str] = []
+    with path.open(errors="replace") as handle:
+        for raw in handle:
+            if not regex.search(raw):
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            message = record.get("message") or {}
+            content = message.get("content")
+            if isinstance(content, list):
+                text = " ".join(
+                    part.get("text", "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            else:
+                text = content if isinstance(content, str) else ""
+            text = " ".join(text.split())
+            if not text or not regex.search(text):
+                continue
+            match = regex.search(text)
+            start = max(0, match.start() - 60)
+            snippet = text[start : match.start() + 140]
+            stamp = (record.get("timestamp") or "")[:19]
+            role = record.get("type", "?")
+            lines.append(f"      {stamp} {role}: …{snippet}…")
+            if len(lines) >= limit:
+                break
+    return lines
+
+
+def print_roster(rows: list[dict]) -> None:
+    resolved = [row for row in rows if row["transcript"]]
+    by_source: dict[str, int] = {}
+    for row in rows:
+        by_source[row["source"] or "unresolved"] = (
+            by_source.get(row["source"] or "unresolved", 0) + 1
+        )
+
+    print(f"{len(rows)} live agent panes · {len(resolved)} mapped to a transcript")
+    print("resolution: " + ", ".join(f"{k}={v}" for k, v in sorted(by_source.items())))
+    print()
+    header = f"{'PANE':<9} {'SRC':<8} {'STATUS':<8} {'TITLE':<44} TRANSCRIPT"
+    print(header)
+    print("-" * len(header))
+    for row in sorted(rows, key=lambda r: r["pane_id"]):
+        title = (row["name"] or row["title"] or "")[:44]
+        transcript = row["transcript"].name if row["transcript"] else "—"
+        print(
+            f"{row['pane_id']:<9} {(row['source'] or '—'):<8} "
+            f"{row['status']:<8} {title:<44} {transcript}"
+        )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Search Claude session transcripts, scoped to live herdr panes."
+    )
+    parser.add_argument("pattern", nargs="?", help="regular expression to search for")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="search every transcript, not just the open panes",
+    )
+    parser.add_argument(
+        "--roster", action="store_true", help="print the pane→transcript map and exit"
+    )
+    parser.add_argument(
+        "-i", "--ignore-case", action="store_true", help="case-insensitive search"
+    )
+    parser.add_argument(
+        "-n",
+        "--excerpts",
+        type=int,
+        default=2,
+        help="matching lines to show per transcript (default 2, 0 to disable)",
+    )
+    parser.add_argument(
+        "--no-subagents",
+        action="store_true",
+        help="skip the transcripts of subagents these sessions spawned",
+    )
+    parser.add_argument("--json", action="store_true", help="emit JSON")
+    args = parser.parse_args()
+
+    if not args.pattern and not args.roster:
+        parser.error("a search pattern is required (or use --roster)")
+
+    rows = build_roster(resolve_processes=not (args.all and not args.roster))
+
+    if args.roster:
+        if args.json:
+            print(
+                json.dumps(
+                    [
+                        {**row, "transcript": str(row["transcript"] or "")}
+                        for row in rows
+                    ],
+                    indent=2,
+                )
+            )
+        else:
+            print_roster(rows)
+        return 0
+
+    known = {row["transcript"]: row for row in rows if row["transcript"]}
+
+    if args.all:
+        paths = sorted(PROJECTS_DIR.glob("*/*.jsonl"))
+        if not args.no_subagents:
+            paths += sorted(PROJECTS_DIR.glob("*/*/subagents/*.jsonl"))
+    else:
+        paths = [row["transcript"] for row in rows if row["transcript"]]
+        if not args.no_subagents:
+            for row in rows:
+                if not row["transcript"]:
+                    continue
+                for child in subagent_transcripts(row["transcript"]):
+                    paths.append(child)
+                    known[child] = {**row, "subagent": child.stem}
+
+    counts = search(paths, args.pattern, args.ignore_case)
+    ranked = sorted(counts.items(), key=lambda item: -item[1])
+
+    if args.json:
+        print(
+            json.dumps(
+                [
+                    {
+                        "transcript": str(path),
+                        "matches": count,
+                        "pane": known.get(path, {}).get("pane_id"),
+                        "title": known.get(path, {}).get("title"),
+                        "source": known.get(path, {}).get("source"),
+                    }
+                    for path, count in ranked
+                ],
+                indent=2,
+            )
+        )
+        return 0
+
+    scope = "all transcripts" if args.all else "open herdr panes"
+    print(
+        f'"{args.pattern}" — {len(ranked)} of {len(paths)} transcripts match '
+        f"({scope})"
+    )
+    if not SEARCHER_IS_RIPGREP:
+        print("  (using /usr/bin/grep — `brew install ripgrep` makes this ~20x faster)")
+    print()
+    for path, count in ranked:
+        row = known.get(path)
+        if row:
+            label = row["name"] or row["title"] or path.stem
+            if row.get("subagent"):
+                label = f"{label}  ↳ subagent {row['subagent'][:20]}"
+            flag = "  ⚠ guessed mapping" if row["source"] == "mtime" else ""
+            print(f"  [{count:>4}] {row['pane_id']:<9} {label}{flag}")
+        else:
+            print(f"  [{count:>4}] {'—':<9} {path.parent.name}/{path.stem[:8]}")
+        if args.excerpts:
+            for line in excerpt(path, args.pattern, args.ignore_case, args.excerpts):
+                print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
