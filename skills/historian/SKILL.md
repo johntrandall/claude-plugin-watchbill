@@ -29,7 +29,7 @@ The head's closing message wakes you; it is not proof. Run `herdr-lifecycle hist
 
 | Exit code | Meaning | Action |
 |---|---|---|
-| 0 | Every head of your chain finished its closeout, or (standing chains: builder, steward, standing lead, advisor) the successor ran `relieve` | Exit (section 3) |
+| 0 | Every head of your chain finished its closeout, or (standing chains: architect, steward, standing lead, advisor) the successor ran `relieve` | Exit (section 3) |
 | 1 | A head is still live | Keep waiting |
 | 2 | A head is gone without closing out | **Do not exit.** Tell the human in one line and wait for their word: you may now hold the best context on the work |
 | 3 | Not a historian, or task-scoped | Not your exit |

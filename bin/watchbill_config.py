@@ -8,9 +8,17 @@ Every value the plugin's tools and hooks need comes from here, in this order:
      configured plugin option to hook processes under this name)
   3. the plugin's options in the user settings file, read only:
      {"pluginConfigs": {"watchbill@<marketplace>": {"options": {KEY: value}}}}
-  4. the default in this file.
+  4. the config file, read only: {KEY: value} (or {"options": {KEY: value}}), kept outside
+     Claude Code's plugin store so a reinstall or a marketplace re-registration (which emptied
+     pluginConfigs on 2026-10-15) cannot wipe it. `watchbill config --write-file` fills it from
+     the resolved values.
+  5. the default in this file.
 Defaults are resolved here, never taken from the manifest: an option that was declared but
 never configured does not reach hooks or skills.
+
+The config file is $WATCHBILL_CONFIG_FILE, else $CLAUDE_CONFIG_DIR/watchbill.json, else
+~/.claude/watchbill.json (inside the ~/.claude folder, so a user who keeps that folder in git
+keeps the file with it).
 
 The settings file is $WATCHBILL_SETTINGS_FILE, else $CLAUDE_CONFIG_DIR/settings.json, else
 ~/.claude/settings.json. With more than one watchbill@… entry, $WATCHBILL_PLUGIN_ID picks one,
@@ -19,17 +27,21 @@ else the one the user-scope install names (installed_plugins.json), else the fir
 """
 import json
 import os
+import re
+import shutil
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # the plugin root
 
 # key -> (type, default, description). Types: string, list, bool, number, path.
 OPTIONS = {
     "human_name": ("string", "the human", "how seats name the human in the loop"),
-    "forbidden_models": ("list", [], "models no seat or delegate may run on (spawns are refused)"),
+    "forbidden_models": ("list", [], "models no seat or delegate may run on, per role: `haiku` for every role, "
+                                  "`architect: none` or `steward: haiku opus` for one role (spawns are refused)"),
     "require_explicit_model": ("bool", True, "every Agent call and session start must name a model"),
     "alert_channels": ("string", "tab glyph only", "how a seat gets the human's attention, in order"),
     "decision_channels": ("string", "chat", "where the human gives decisions"),
-    "drafting_tool": ("path", "${CLAUDE_PLUGIN_ROOT}/bin/criticmarkup.py", "the Track Changes tool"),
+    "drafting_tool": ("path", "obsidian-track-changes-agent", "the Track Changes tool: a command on PATH (the obsidian-track-changes-agent "
+                                                "plugin provides `obsidian-track-changes-agent`) or a path to one with the same subcommands"),
     "drafting_author": ("string", None, "the human's author name in Track Changes (default: human_name)"),
     "headroom_command": ("string", "", "a load check run before every spawn; empty skips it"),
     "scheduler": ("string", "none", "what restarts seats on a schedule"),
@@ -48,6 +60,21 @@ def settings_file():
         return os.environ["WATCHBILL_SETTINGS_FILE"]
     base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     return os.path.join(base, "settings.json")
+
+
+def config_file():
+    if os.environ.get("WATCHBILL_CONFIG_FILE"):
+        return os.environ["WATCHBILL_CONFIG_FILE"]
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(base, "watchbill.json")
+
+
+def file_options():
+    """(path, options dict, exists) from the config file; unknown keys are kept for --explain."""
+    path = config_file()
+    data = _load_json(path)
+    opts = data.get("options") if isinstance(data.get("options"), dict) else data
+    return path, {k: v for k, v in opts.items() if not k.startswith("_")}, os.path.isfile(path)
 
 
 def plugins_file():
@@ -113,8 +140,17 @@ def _coerce(kind, value):
     return str(value)
 
 
+def _caches(_cache):
+    """The per-call cache: {"plugin": plugin_options(), "file": file_options()}; a bare
+    plugin_options() tuple (older callers) is accepted too."""
+    if isinstance(_cache, dict):
+        return _cache
+    return {"plugin": _cache if _cache is not None else plugin_options(), "file": file_options()}
+
+
 def resolve(key, _cache=None):
-    """(value, source) for one option. Source: eval env, env, hook-env, settings <id>, default."""
+    """(value, source) for one option. Source: eval env, env, hook-env, settings <id>,
+    file <path>, default."""
     if key not in OPTIONS:
         raise KeyError(f"unknown option {key!r}; known: {', '.join(OPTIONS)}")
     kind, default, _ = OPTIONS[key]
@@ -127,10 +163,17 @@ def resolve(key, _cache=None):
                 return _coerce(kind, os.environ[var]), f"{source} {var}"
             except ValueError:
                 pass  # a bad value falls through to the next source
-    pid, opts, _ = _cache if _cache is not None else plugin_options()
+    _cache = _caches(_cache)
+    pid, opts, _ = _cache["plugin"]
     if key in opts and opts[key] not in (None, ""):
         try:
             return _coerce(kind, opts[key]), f"settings {pid}"
+        except ValueError:
+            pass
+    fpath, fopts, _ = _cache["file"]
+    if key in fopts and fopts[key] not in (None, ""):
+        try:
+            return _coerce(kind, fopts[key]), f"file {fpath}"
         except ValueError:
             pass
     if key == "drafting_author":
@@ -140,9 +183,32 @@ def resolve(key, _cache=None):
 
 
 def resolve_all():
-    """{key: (value, source)} for every option, reading the settings file once."""
-    cache = plugin_options()
+    """{key: (value, source)} for every option, reading the settings and config files once."""
+    cache = {"plugin": plugin_options(), "file": file_options()}
     return {k: resolve(k, cache) for k in OPTIONS}
+
+
+def is_configured(values=None):
+    """Does any value come from somewhere other than the defaults?"""
+    v = values or resolve_all()
+    return any(not src.startswith("default") and not src.startswith("human_name (default") for _, src in v.values())
+
+
+def write_file(values=None, path=None):
+    """Write every non-default resolved value into the config file (merged over what it holds,
+    unknown keys kept), so the configuration survives a plugin reinstall. Returns (path, written)."""
+    v = values or resolve_all()
+    path = path or config_file()
+    data = _load_json(path)
+    existing = data.get("options") if isinstance(data.get("options"), dict) else data
+    written = {k: val for k, (val, src) in v.items()
+               if not src.startswith("default") and not src.startswith("human_name (")}
+    merged = {**existing, **written}
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(merged, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    return path, written
 
 
 def eval_pinned():
@@ -155,13 +221,44 @@ def get(key):
     return resolve(key)[0]
 
 
-def is_forbidden_model(model, forbidden=None):
-    """Does this model name or id name a forbidden model? 'opus' matches opus, Opus,
+def role_name(role):
+    """A role as the configuration names it: `watchbill:rules-lead`, `rules-lead` and `rules` are
+    all `rules`. It is the role being launched (a seat kind, a watchbill agent type), never the
+    caller; '' for a launch that names none."""
+    r = (role or "").strip().strip("'\"").lower()
+    if r.startswith("watchbill:"):
+        r = r[len("watchbill:"):]
+    if r.endswith("-lead"):
+        r = r[:-len("-lead")]
+    return r
+
+
+ROLE_ENTRY = re.compile(r"^\s*([A-Za-z][\w-]*)\s*:\s*(.*)$")
+
+
+def forbidden_models_for(role, forbidden=None):
+    """The forbidden models for one role. An entry `<model>` forbids it for every role; an entry
+    `<role>: <models>` (space-separated; `none` for nothing) is that role's whole list and
+    replaces the every-role entries for it. A launch that names no role gets the every-role list."""
+    entries = forbidden if forbidden is not None else get("forbidden_models")
+    base, per_role = [], {}
+    for e in entries:
+        m = ROLE_ENTRY.match(str(e))
+        if m:
+            per_role[role_name(m[1])] = [x for x in m[2].replace("|", " ").split() if x.lower() != "none"]
+        elif str(e).strip():
+            base.append(str(e).strip())
+    r = role_name(role)
+    return per_role[r] if r in per_role else base
+
+
+def is_forbidden_model(model, forbidden=None, role=""):
+    """Does this model name or id name a model forbidden for this role? 'opus' matches opus, Opus,
     claude-opus-5-5 and opus[1m]; matching is on the whole name, never on quoted text."""
     m = (model or "").strip().strip("'\"").lower()
     if not m:
         return ""
-    for f in (forbidden if forbidden is not None else get("forbidden_models")):
+    for f in forbidden_models_for(role, forbidden):
         f = f.strip().lower()
         if not f:
             continue
@@ -169,6 +266,18 @@ def is_forbidden_model(model, forbidden=None):
         if base == f or base == f"claude-{f}" or base.startswith(f"claude-{f}-") or base.startswith(f"{f}-"):
             return f
     return ""
+
+
+def drafting_tool_file(tool=None):
+    """The Track Changes tool as a file: the configured drafting_tool when it is a path to one,
+    else that command found on PATH; '' when neither exists. The obsidian-track-changes-agent plugin provides
+    the command (`obsidian-track-changes-agent`; `obsidian-track-changes-agent install-links` puts it on PATH)."""
+    tool = get("drafting_tool") if tool is None else tool
+    if not tool:
+        return ""
+    if os.path.sep in tool:
+        return tool if os.path.isfile(tool) else ""
+    return shutil.which(tool) or ""
 
 
 def overlay_text(limit=12000):
@@ -186,19 +295,26 @@ def overlay_text(limit=12000):
 
 def summary_lines(values=None):
     """The resolved values as the short lines the session-start context shows."""
-    v = {k: val for k, (val, _) in (values or resolve_all()).items()}
-    forbidden = ", ".join(v["forbidden_models"]) or "none"
+    values = values or resolve_all()
+    v = {k: val for k, (val, _) in values.items()}
+    forbidden = "; ".join(v["forbidden_models"]) or "none"
     lines = [
         f"The human in the loop: {v['human_name']} (Track Changes author: {v['drafting_author']}).",
         f"Forbidden models: {forbidden}." + (" Every Agent call and session start names its model."
                                              if v["require_explicit_model"] else ""),
         f"Alerts: {v['alert_channels']}. Decisions arrive by: {v['decision_channels']}.",
         f"Scheduler: {v['scheduler']}. Infrastructure faults go to: {v['infra_home'] or v['human_name']}.",
-        f"Track Changes tool: {v['drafting_tool']}.",
+        f"Track Changes tool: {v['drafting_tool']}"
+        + (f" ({found})." if (found := drafting_tool_file(v['drafting_tool'])) else
+           " (not found: install the obsidian-track-changes-agent plugin and run `obsidian-track-changes-agent install-links`)."),
         f"Handoff: offer one at {v['handoff_offer_tokens']:,} tokens of context (cost band); hand off at "
         f"{v['handoff_hard_percent']} % of {v['context_window_tokens']:,}. Check with `watchbill context`.",
         f"Relief deadline: {v['relief_deadline_minutes']} minutes on each side (`herdr-lifecycle relief-check`).",
     ]
     if v["headroom_command"]:
         lines.append(f"Load check before every spawn: `{v['headroom_command']}`.")
+    if not is_configured(values):
+        lines.append(f"No configuration found (no watchbill@… entry in pluginConfigs, no {config_file()}): "
+                     f"every value above is a default. `watchbill config --write-file` keeps a copy that "
+                     f"survives a plugin reinstall.")
     return lines

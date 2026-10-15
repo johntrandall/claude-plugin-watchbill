@@ -1,6 +1,6 @@
 # Interrupting the human
 
-For the steward, the builder and every lead. Communication is its own layer: the human decides
+For the steward, the architect and every lead. Communication is its own layer: the human decides
 on the channels the system's brief names (from the configured `decision_channels`), and every
 decision is recorded where its item lives plus one line in the decisions file
 (`watchbill:watchbill` section 3).
@@ -37,5 +37,5 @@ waits.
 
 ## Measure it
 The run manifest's end line should carry `pings_sent` and `human_items_opened`, computed by the
-tool (planned). If the human sets a ceiling on needs-human items per run, the builder's
+tool (planned). If the human sets a ceiling on needs-human items per run, the architect's
 `watch.md` watches it.

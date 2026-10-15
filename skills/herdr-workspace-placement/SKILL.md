@@ -1,7 +1,7 @@
 ---
 name: herdr-workspace-placement
 type: convention
-description: "Which herdr workspace (shelf) a session's tab belongs in once its work changes shape, and the order of tabs in a workspace: a session that only monitors moves itself to the monitoring shelf, one that only waits on something other than the human moves to a WAIT shelf, waiting on the human stays put, historians and parked builders stay put; the verified pane-move recipe and the tab-move call. Auto-invoke when you arm a watch after delivering, when you start waiting on a delivery, an upstream or a machine, when you take or hand over a lead role, or when sorting other sessions."
+description: "Which herdr workspace (shelf) a session's tab belongs in once its work changes shape, and the order of tabs in a workspace: a session that only monitors shelves itself on the monitoring shelf with the 📡 glyph (`herdr-lifecycle shelve monitoring`), one that only waits on something other than the human shelves itself on a WAIT shelf with ⏳, waiting on the human stays put, historians and parked architects stay put; a shelved session that picks up real work or spawns agents comes back to its own workspace first (`unshelve`; `spawn` does it) and tucks itself away again when it winds down. Auto-invoke when you arm a watch after delivering, when you start waiting on a delivery, an upstream or a machine, when real work reaches a shelved session, before spawning from a shelf, when you take or hand over a lead role, or when sorting other sessions."
 tags: [agents, herdr, workspace, placement, watchbill]
 ---
 > Where a global skill disagrees with the watchbill plugin on a decided point, the plugin's rules win (list: `watchbill:watchbill`, top).
@@ -18,10 +18,18 @@ nobody sweeps for it.
 `WAIT for upstream`, `WAIT for infra`, `WAIT for boot`).
 
 ## 1. The rule
-- **Only monitoring, not orchestrating → the monitoring shelf.** Only monitoring: the deliverable
-  is handed over, a watch keeps the session alive, and nothing is pending from the human inside it.
-  Not orchestrating: no live teammates, no running sub-agents, no sibling sessions waiting on your
-  decisions. Tab agents or handoffs you launched do not count: they answer to the human.
+- **Only monitoring, not orchestrating → the monitoring shelf, glyph `📡`.** Only monitoring: the
+  deliverable is handed over, a watch keeps the session alive, and nothing is pending from the
+  human inside it. Not orchestrating: no live teammates, no running sub-agents, no sibling sessions
+  waiting on your decisions. Tab agents or handoffs you launched do not count: they answer to the
+  human. `📡` means "alive on a shelf, acts itself when its condition fires" (a daily scan, a
+  health check); it is not `👁`, the parked architect watching its own system's outcomes from its
+  own workspace, and not `⏳`, where someone else moves next.
+- **Real work, or a spawn, ends the shelf stay** (the human, 2026-10-15). A shelved session that
+  picks up real work, or spawns a sub-agent, a teammate or a sibling, first goes back to its own
+  workspace (`herdr-lifecycle unshelve`; `spawn` and `spawn --seat` run it for you), works there,
+  and when it winds down to a watch again tucks itself back on the shelf (`shelve` again). The
+  shelves hold only sessions that are waiting or listening; the human never finds live work there.
 - **Only waiting on something other than the human → its WAIT shelf.** A person other than the
   human, a carrier, an upstream maintainer, a long job, a machine coming back.
 - **Waiting on the human is not a WAIT shelf.** The session stays on its project shelf, where the
@@ -29,34 +37,39 @@ nobody sweeps for it.
 - **Monitoring or waiting is "who moves next".** If someone else moves next, it is WAIT even with a
   watcher armed; if you act when a condition fires, it is monitoring. Move; never fake it with a
   badge.
-- **Stay put:** a `↪` historian (`watchbill:historian`); a parked watchbill builder (`👁`, in its
+- **Stay put:** a `↪` historian (`watchbill:historian`); a parked watchbill architect (`👁`, in its
   system's workspace); a coordinator watching its own siblings; any seat of a watchbill system
   while it works.
 
 Move when you arm the watch: you still have the context to write the label. When the watch ends
-or real work resumes, move back the same way and clear the state label.
+or real work resumes, come back the same way (`unshelve`) and clear the state badge.
 
 ## 2. Recipe
-Look the shelf up by label every time; workspace ids change on restore.
 ```bash
-LABEL="MONITORING <SUBJECT>"
-WS=$(herdr workspace list | python3 -c '
-import sys,json; L=sys.argv[1]
-ws=[w for w in json.load(sys.stdin)["result"]["workspaces"] if w["label"].lstrip("? ")==L]
-print(ws[0]["workspace_id"] if ws else "")' "$LABEL")
-[ -n "$WS" ] || WS=$(herdr workspace create --label "$LABEL" --cwd "$PWD" --no-focus \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["workspace"]["workspace_id"])')
-PANE=$(herdr-lifecycle whoami | python3 -c 'import sys,json;print(json.load(sys.stdin)["pane_id"])')
-herdr pane move "$PANE" --new-tab --workspace "$WS" --label "<SUBJECT> <what you watch>" --no-focus
+# only monitoring: the shelf MONITORING <SUBJECT> (created when missing), tab "📡 <topic>"
+herdr-lifecycle shelve monitoring --topic "<SUBJECT> <what you watch> (next <when>)" --subject <subject> \
+  [--badge "next <when>"]
+# only waiting on someone other than the human: the shelf WAIT for <x>, tab "⏳ <topic>"
+herdr-lifecycle shelve waiting --topic "<what you wait on>" --for people|delivery|upstream|infra|boot
+# an existing shelf by its exact label (the human's setup may name one)
+herdr-lifecycle shelve monitoring --topic "…" --shelf "MONITORING INFRA"
+# real work again, or before you spawn (spawn does this itself)
+herdr-lifecycle unshelve [--topic "<your tab text>"]
 ```
-- Resolve your own pane from your session id (`herdr-lifecycle whoami`), never from
-  `$HERDR_PANE_ID`, which goes stale after a move or a restore. The move keeps the live process
-  and its scrollback; the emptied source tab closes itself.
-- Re-stamp any state label on the pane afterwards:
-  `herdr pane report-metadata <pane> --source <watch> --state-label idle="⏳ watching · <what> (next <when>)" --ttl-ms 86400000`
-  (24 hours is the maximum TTL; the shelf is the durable signal).
+- `shelve` resolves your own pane from your session id (never `$HERDR_PANE_ID`, which goes stale
+  after a move or a restore), finds the shelf by label (a leading `?` and case ignored) or creates
+  it, moves the pane into a new tab there (the live process and its scrollback come along; the
+  emptied source tab closes itself), writes the glyph-first label again after the move (a move can
+  reset a label), and records your home workspace, its label and your cwd in the lifecycle ledger.
+  It refuses while `claude` processes you launched still run (`--force` overrides), and refuses a
+  second shelve before an `unshelve`.
+- `unshelve` moves you back to the recorded home workspace, recreating it with the recorded label
+  and cwd when it closed behind you, and relabels the tab active (the `_` lead mark and topic from
+  your old label, or `--topic`).
+- `--badge` stamps a pane state badge (24 hours is the maximum TTL) for the detail ("next 09:23");
+  the shelf and the glyph are the durable signal. Re-stamp it on each re-arm.
 - Tab label: `<SUBJECT> <what is watched or awaited>`; the subject prefix lets the human scan a
-  mixed shelf.
+  mixed shelf. The glyph is set by the command, never typed into `--topic`.
 
 ## 3. Tab order inside a workspace
 The lead (orchestrator) is the left-most tab, observers next, workers after. A lead tab may start

@@ -30,7 +30,7 @@ adapters: files (mtime), frontmatter (named fields), marks (review marks by auth
 ```
 
 The engine owns the loop, settle window, seen-state, cap, exit codes and the liveness registry.
-Start from `cmd_watch` in `criticmarkup.py`, the only existing watcher with all of baseline,
+Start from `cmd_watch` in the obsidian-track-changes-agent tool, the only existing watcher with all of baseline,
 seen-set, settle and the hazard exit. Existing watchers migrate to it one at a time.
 
 ## 3. Gaps nobody has solved

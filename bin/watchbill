@@ -10,8 +10,9 @@
       decisions file (dev-docs/decisions.md; dev-docs/questions.md is the legacy name, then
       decisions.md) and a README section headed "Decisions for the human" (or for the
       configured human_name). A card whose answer sits only inside an unaccepted Track
-      Changes suggestion is open ("proposed"): marks are read with criticmarkup.py's own
-      parser (the copy beside this tool; $WATCHBILL_CRITICMARKUP overrides).
+      Changes suggestion is open ("proposed"): marks are read with the Track Changes tool's own
+      parser (the configured drafting_tool, `obsidian-track-changes-agent` on PATH by default, which the
+      obsidian-track-changes-agent plugin provides; $WATCHBILL_CRITICMARKUP overrides with a file).
       Needs-human items: the newest manifest line with a `needs_human` field (a count, or
       reason class -> count), computed by the system's tool. Where a source is missing the Ball line says "unknown", never "nobody". It
       writes nothing and messages no one.
@@ -34,7 +35,8 @@
   watchbill install-links [--dev DIR] [--check] [--dry-run] [--from NAME@MARKETPLACE]
                           [--bin-dir DIR] [--force]
       Point ~/.local/bin/{herdr-lifecycle,herdr-session-search,watchbill} at the installed
-      plugin's bin/: the user-scope `watchbill@…` entry in ~/.claude/plugins/installed_plugins.json
+      plugin's bin/: the user-scope `watchbill@…` entry in $CLAUDE_CONFIG_DIR/plugins/installed_plugins.json
+      (~/.claude by default; $WATCHBILL_PLUGINS_FILE overrides)
       (its installPath; $WATCHBILL_PLUGINS_FILE overrides the file). Run it after every plugin
       update: the install path carries the version, so links into an old version go stale.
       --dev DIR points them at a working tree instead (DIR/plugin/bin, else DIR/bin), for
@@ -43,15 +45,18 @@
       not a symlink is refused unless --force. With two user-scope installs from different
       marketplaces, --from picks one.
 
-  watchbill config [--explain] [--json] [KEY]
+  watchbill config [--explain] [--json] [--write-file] [KEY]
       The resolved configuration: (EVAL_)WATCHBILL_<KEY>, then CLAUDE_PLUGIN_OPTION_<KEY>, then the
-      plugin's options in the user settings (pluginConfigs, read only), then the default.
-      --explain names each value's source. With one KEY, prints only its value.
+      plugin's options in the user settings (pluginConfigs, read only), then the config file
+      ($WATCHBILL_CONFIG_FILE, else $CLAUDE_CONFIG_DIR/watchbill.json, else ~/.claude/watchbill.json;
+      {KEY: value}), then the default. --explain names each value's source and both files.
+      With one KEY, prints only its value. --write-file writes every non-default value into the
+      config file (merged over what it holds): a copy a plugin reinstall cannot wipe.
 
   watchbill land <branch> --backfill owed|none --steward affected|unaffected|none
                  [--approved WHERE] [--fixes SHA]... [--cycle ID] [--message TEXT]
                  [--system DIR] [--wait MIN] [--dry-run]
-      The builder lands a build branch: merges it --no-ff into the branch checked out in the
+      The architect lands a build branch: merges it --no-ff into the branch checked out in the
       PRIMARY checkout (the steward's), with the trailers Watchbill-Event: landed,
       Watchbill-Backfill, Watchbill-Steward, and Watchbill-Fixes, Watchbill-Approved (where
       the human's approval is recorded; single-use: an approval an earlier landing named is
@@ -61,7 +66,7 @@
 
   watchbill rules-sha [DIR] [--full] [--explain]
       The rules SHA to stamp on an item: the newest first-parent commit on HEAD that touched
-      the rules paths (an owners.yaml `rules:` list, else the builder's and build leads'
+      the rules paths (an owners.yaml `rules:` list, else the architect's and rules leads'
       paths, else the whole tree). Exit 1 while rules paths have uncommitted changes.
 
   watchbill check-note <file>... [--json]
@@ -164,8 +169,8 @@ def system_subject(rows):
         if r["subject"]:
             return r["subject"]
     for r in rows:
-        m = re.match(r"^(.+)-(builder|steward)(-ho\d+)?$", r["name"])
-        if m and r["seat"] in ("builder", "steward"):
+        m = re.match(r"^(.+)-(architect|builder|steward)(-ho\d+)?$", r["name"])
+        if m and r["seat"] in ("architect", "steward"):
             return m[1]
     return ""
 
@@ -173,10 +178,14 @@ def system_subject(rows):
 def seat_task(row, subject):
     """The --task that rebuilds this row's name, or None if the name does not fit the seat."""
     name, seat = re.sub(r"-ho\d+$", "", row["name"]), row["seat"]
-    prefix = {"build": f"{subject}-build-", "run": f"{subject}-run-", "standing": f"{subject}-",
+    prefix = {"rules": f"{subject}-rules-", "run": f"{subject}-run-", "standing": f"{subject}-",
               "advisor": f"{subject}-advisor"}.get(seat)
-    if seat in ("builder", "steward"):
-        return "" if name == f"{subject}-{seat}" else None
+    if seat == "architect":  # a 0.3 roster's <subject>-builder still restores, under its own name
+        return "" if name in (f"{subject}-architect", f"{subject}-builder") else None
+    if seat == "steward":
+        return "" if name == f"{subject}-steward" else None
+    if seat == "rules" and name.startswith(f"{subject}-build-"):
+        prefix = f"{subject}-build-"
     if not prefix or not name.startswith(prefix):
         return None
     task = name[len(prefix):]
@@ -289,7 +298,7 @@ def needs_human(lines):
 
 # --- Decisions for the human: one decisions file per system ---------------------------
 
-CRITICMARKUP = os.environ.get("WATCHBILL_CRITICMARKUP") or os.path.join(HERE, "criticmarkup.py")
+DRAFTING_TOOL = os.environ.get("WATCHBILL_CRITICMARKUP") or config.drafting_tool_file()
 DECISION_FILES = ("dev-docs/decisions.md", "dev-docs/questions.md", "decisions.md")  # questions.md: legacy
 
 
@@ -314,31 +323,37 @@ def decisions_heading(heading):
     h = heading.lower()
     return any(f"decisions for {who}" in h for who in {"the human", human().lower()})
 MARK_OPEN = re.compile(r"\{(?:\w+=\"[^\"]*\"\s*)*(?:\+\+|--|~~|>>|==)")
-_cm = []
+_drafting_module = []
 
 
-def criticmarkup():
-    """criticmarkup.py loaded as a module (its parse() is what `criticmarkup.py list` uses), or None."""
-    if not _cm:
+def drafting_tool():
+    """The Track Changes tool loaded as a module (its parse() is what `obsidian-track-changes-agent list` uses),
+    or None when the tool is not installed."""
+    if not _drafting_module:
         mod = None
-        if os.path.isfile(CRITICMARKUP):
+        if DRAFTING_TOOL and os.path.isfile(DRAFTING_TOOL):
             try:
-                loader = importlib.machinery.SourceFileLoader("criticmarkup", CRITICMARKUP)
-                mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("criticmarkup", loader))
+                loader = importlib.machinery.SourceFileLoader("drafting_tool", DRAFTING_TOOL)
+                mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("drafting_tool", loader))
                 loader.exec_module(mod)
             except Exception:
                 mod = None
-        _cm.append(mod)
-    return _cm[0]
+        _drafting_module.append(mod)
+    return _drafting_module[0]
+
+
+def drafting_tool_missing():
+    return (f"Track Changes tool not found (drafting_tool: {config.get('drafting_tool')}; install the "
+            f"obsidian-track-changes-agent plugin and run `obsidian-track-changes-agent install-links`)")
 
 
 def resolve_marks(text, view):
     """The text as it stands ("current": every pending suggestion unaccepted, agents' comments
     dropped, the human's kept) or as proposed ("proposed": every suggestion accepted). None when the
-    text has marks and criticmarkup.py cannot be loaded."""
+    text has marks and the Track Changes tool cannot be loaded."""
     if not MARK_OPEN.search(text):
         return text
-    cm = criticmarkup()
+    cm = drafting_tool()
     if not cm:
         return None
     out, i = [], 0
@@ -440,8 +455,8 @@ def decisions(d, readme_text):
                        "section 'Decisions for the human')")
     n_unknown = sum(1 for c in items if c[2] == "unknown")
     if n_unknown:
-        unknown.append(f"criticmarkup.py not found at {CRITICMARKUP}: {n_unknown} decision(s) carry Track "
-                       f"Changes marks and cannot be read")
+        unknown.append(f"{drafting_tool_missing()}: {n_unknown} decision(s) carry Track Changes marks "
+                       f"and cannot be read")
     return {"note": note, "readme": has_section, "items": [c for c in items if c[2] != "unknown"],
             "unknown": unknown}
 
@@ -686,7 +701,7 @@ def first_prompt(r, d, name, cause):
                f"The roster names no brief: read the system README, then ask {human()} for your brief. ")
             + "If you resumed, your Monitor and watchers did not survive: re-arm the watcher your brief or "
               "dev-docs/watch.md names. Then relabel your tab with `herdr-lifecycle label` (or `park` for a "
-              "parked builder) and say in one line what you picked up.")
+              "parked architect) and say in one line what you picked up.")
 
 
 def plan_restore(d, rows, live, events, workspace="", cause=DEFAULT_CAUSE, stalled=None):
@@ -877,7 +892,6 @@ def cmd_restore(argv):
 # --- install-links ------------------------------------------------------------------
 
 LINKED_TOOLS = ("herdr-lifecycle", "herdr-session-search", "watchbill")
-PLUGINS_FILE = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
 
 
 def installed_bin(plugins_file, pick=None):
@@ -936,7 +950,7 @@ def link_plan(src_bin, bin_dir):
 def cmd_install_links(argv):
     dev = hl.opt(argv, "--dev")
     src_bin, what = dev_bin(dev) if dev else installed_bin(
-        os.environ.get("WATCHBILL_PLUGINS_FILE") or PLUGINS_FILE, hl.opt(argv, "--from"))
+        config.plugins_file(), hl.opt(argv, "--from"))  # $WATCHBILL_PLUGINS_FILE, else $CLAUDE_CONFIG_DIR/plugins/…
     bin_dir = os.path.abspath(os.path.expanduser(hl.opt(argv, "--bin-dir", "~/.local/bin")))
     check, dry, force = "--check" in argv, "--dry-run" in argv, "--force" in argv
     plan = link_plan(src_bin, bin_dir)
@@ -989,6 +1003,10 @@ def cmd_config(argv):
         die(f"unknown option(s) {', '.join(bad)}; known: {', '.join(config.OPTIONS)}")
     vals = config.resolve_all()
     explain, as_json = "--explain" in argv, "--json" in argv
+    if "--write-file" in argv:
+        path, written = config.write_file(vals)
+        print(f"wrote {len(written)} value(s) to {path}: {', '.join(written) or 'none (every value is a default)'}")
+        return
     keys = keys or list(config.OPTIONS)
     if as_json:
         out = {k: ({"value": vals[k][0], "source": vals[k][1]} if explain else vals[k][0]) for k in keys}
@@ -999,16 +1017,20 @@ def cmd_config(argv):
         return
     if explain:
         pid, _, why = config.plugin_options()
+        fpath, fopts, fexists = config.file_options()
         print(f"settings file: {config.settings_file()}")
         print(f"plugin entry:  {pid or 'none'} ({why})")
-        print("order: EVAL_WATCHBILL_<KEY>, then WATCHBILL_<KEY>, then CLAUDE_PLUGIN_OPTION_<KEY>, then the settings entry, then the default")
+        print(f"config file:   {fpath} ({f'{len(fopts)} value(s)' if fexists else 'missing'})")
+        print("order: EVAL_WATCHBILL_<KEY>, then WATCHBILL_<KEY>, then CLAUDE_PLUGIN_OPTION_<KEY>, then the settings entry, then the config file, then the default")
+        if not config.is_configured(vals):
+            print("nothing configured: every value is a default (`watchbill config --write-file` keeps a copy that survives a reinstall)")
     width = max(len(k) for k in keys)
     for k in keys:
         line = f"{k:{width}} = {show_value(vals[k][0])}"
         print(line + (f"    [{vals[k][1]}]" if explain else ""))
 
 
-# --- rules-sha and land (R2: the builder lands between the steward's items) -----------
+# --- rules-sha and land (R2: the architect lands between the steward's items) -----------
 
 def owners_module():
     path = os.path.join(os.path.dirname(HERE), "hooks", "ownership_warn.py")
@@ -1018,11 +1040,13 @@ def owners_module():
     return mod
 
 
-RULES_KEYS = {"builder", "build", "build-lead", "watchbill:builder", "watchbill:build-lead"}
+# The rules-side owners keys; the 0.3 keys (builder, build, build-lead) still count.
+RULES_KEYS = {"architect", "rules", "rules-lead", "watchbill:architect", "watchbill:rules-lead",
+              "builder", "build", "build-lead", "watchbill:builder", "watchbill:build-lead"}
 
 
 def rules_globs(d):
-    """(globs, why): an owners.yaml `rules:` list, else the builder's and build leads' globs;
+    """(globs, why): an owners.yaml `rules:` list, else the architect's and rules leads' globs;
     (None, why) when the system has no owners file or no rules-side owner."""
     path = os.path.join(d, "dev-docs", "owners.yaml")
     if not os.path.isfile(path):
@@ -1037,11 +1061,11 @@ def rules_globs(d):
     globs = []
     for key, val in (data.get("owners") or {}).items():
         key = str(key)
-        if key in RULES_KEYS or hl.seat_from_name(key) in ("builder", "build"):
+        if key in RULES_KEYS or hl.seat_from_name(key) in ("architect", "rules"):
             globs += [str(g) for g in (val if isinstance(val, list) else [val])]
     if not globs:
-        return None, "no builder or build-lead owner in owners.yaml: the whole tree"
-    return globs, "the builder's and build leads' paths in owners.yaml"
+        return None, "no architect or rules-lead owner in owners.yaml: the whole tree"
+    return globs, "the architect's and rules leads' paths in owners.yaml"
 
 
 def rules_sha(d, full=False):
@@ -1245,9 +1269,9 @@ def note_problems(path):
     probs = []
     line_of = lambda i: text.count("\n", 0, i) + 1  # noqa: E731
     if MARK_OPEN.search(text) or CLOSER.search(text):
-        cm = criticmarkup()
+        cm = drafting_tool()
         if not cm:
-            probs.append(f"cannot check Track Changes marks: criticmarkup.py not found at {CRITICMARKUP}")
+            probs.append(f"cannot check Track Changes marks: {drafting_tool_missing()}")
         else:
             spans = []
             for mk in cm.parse(text):

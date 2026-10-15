@@ -12,8 +12,11 @@ tags: [agents, monitoring, watch, herdr, watchbill]
 A session is in **monitoring mode** when its deliverable is handed over and the only thing keeping
 it alive is a watch. Where it sits is `watchbill:herdr-workspace-placement`; how to write the
 watcher is `watchbill:watchers`; this skill is what the session does while it watches. A parked
-watchbill builder is a special case: it stays in its system's workspace with `👁`
-(`watchbill:builder`).
+watchbill architect is a special case: it stays in its system's workspace with `👁`
+(`watchbill:architect`). Every other monitoring session sits on a shelf with `📡`
+(`herdr-lifecycle shelve monitoring`) and leaves it (`unshelve`) the moment real work or a spawn
+comes; `📡` means "alive, acts itself when its condition fires", `👁` the parked architect, `⏳`
+someone else moves next.
 
 An observer attached to a live run (a monitor on a running job) is working, not monitoring; it
 moves only if a follow-up watch remains after the run. Housekeeping, a finished task, or waiting
@@ -29,6 +32,13 @@ project README or tracker, a card comment, your last message):
 4. **Alert or note:** what interrupts the human (the alert channels in the session context) and
    what only gets a log line. Decide now, not on the first anomaly.
 5. **Cadence**, matched to how fast the watched thing changes.
+6. **The resume line**: how the watch comes back after a restart, a network outage or a usage
+   limit, as a command the resumed session runs first ("on resume: run `<script> --once`, then
+   re-arm the tick"). A session-bound watch (Monitor, ScheduleWakeup, a session cron) dies with
+   the session and nothing re-arms it: in one 7-day observation a reboot and a network outage
+   silently dropped every wakeup loop for up to 48 hours. The script and its state must be
+   durable (section 2) for the line to mean anything. With no scheduler configured, this line is
+   the only restart path, so it also goes in the tab label's topic or the README roster.
 
 Put the cadence and next check in the tab label (`… · recheck Thu 08:47`) and move to the shelf
 in the same turn.

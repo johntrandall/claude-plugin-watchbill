@@ -2,10 +2,11 @@
 
 While a hold file exists at a vault's root, every watchbill writer refuses to write under it:
 the hold_guard hook denies Edit, Write, MultiEdit, NotebookEdit and recognised shell writes,
-and criticmarkup.py refuses every write. The human creates the file from any device and
+and the Track Changes tool (`obsidian-track-changes-agent`) refuses every write. The human creates the file from any device and
 deletes it to release the hold; agents never create or delete it.
 
-Two names are accepted. `.watchbill-hold` is the canonical one. `watchbill-hold.md` is a
+Four names are accepted: watchbill's two and the obsidian-track-changes-agent tool's two, so one hold stops both.
+`.watchbill-hold` is the canonical one. `watchbill-hold.md` is a
 visible note, because Obsidian cannot create a dotfile and its own Sync does not carry
 hidden files, so a hold set from a phone needs a visible name.
 
@@ -15,7 +16,7 @@ The search starts at the target and walks up to the first folder that holds `.ob
 import os
 import time
 
-HOLD_NAMES = (".watchbill-hold", "watchbill-hold.md")
+HOLD_NAMES = (".watchbill-hold", "watchbill-hold.md", ".track-changes-hold", "track-changes-hold.md")
 
 
 def hold_for(path):

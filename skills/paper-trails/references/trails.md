@@ -6,7 +6,7 @@ announce-and-ack and no pause. Where this page and the skill disagree, the skill
 
 ## 1. Who owns which trail
 
-| Trail (where) | Builder | Steward | Lead | Crew | Historian | Human |
+| Trail (where) | Architect | Steward | Lead | Crew | Historian | Human |
 |---|---|---|---|---|---|---|
 | Commits with session trailer (git) | rules, README, briefs | item records it changed | its files | its files, `REPORT:` in body | — | — |
 | System README: current rules, roster | **owns** | reads | reads | — | — | approves |
@@ -24,21 +24,21 @@ announce-and-ack and no pause. Where this page and the skill disagree, the skill
 
 ## 2. Where things go, by situation
 
-**Building** (the builder's trails)
+**Building** (the architect's trails)
 
 | Situation | Record |
 |---|---|
 | Cycle starts | Brief in the cycle folder with the human's request verbatim and the gate: which checks, what "done" means, which outcome numbers the system must emit. The human's yes to the gate recorded where it was given and in the decisions file. |
 | A rule change lands | `watchbill land` merges the build branch with the why; README edited in the same merge; trailers `Watchbill-Event: landed`, `Watchbill-Backfill: owed\|none`, `Watchbill-Steward: affected\|unaffected\|none`, and `Watchbill-Approved: <where recorded>` when the change needed the human's approval (the commit-msg hook rejects a `build/*` merge without `landed`). |
-| Builder tells the steward | One FYI message listing the files and the landed SHA. No ack, no wait, no pause: the landing happened between the steward's items, and the steward adopts the SHA after its check passes, writing `adopted <sha>` in its run manifest. If the steward is not live, the landed commit is the message. |
+| Architect tells the steward | One FYI message listing the files and the landed SHA. No ack, no wait, no pause: the landing happened between the steward's items, and the steward adopts the SHA after its check passes, writing `adopted <sha>` in its run manifest. If the steward is not live, the landed commit is the message. |
 | Backfill | Crew writes a process line per record and one commit with `Watchbill-Event: backfilled` and `Watchbill-Rule: <landed sha>`, after its own script count. Records the backfill could not fix go in its report. |
 | Verifier finds a problem | Report saved verbatim; a commit with `Watchbill-Event: verify-failed` and `Watchbill-Rule: <sha>`: the **exposure window** runs from that rule to the landed fix whose `Watchbill-Fixes` names it, so the steward knows which items were written under the faulty rule. |
 | Lasting design decision | README states it with the human's words and the rejected alternative; a decision record only if it crosses systems; a memory note a pointer. |
-| The human states a rule or rejects an approach | The seat the human is talking to records their words that turn, where the decision lives and in the decisions file. The builder promotes the rule into the enforcing text, ideally a check, in the same cycle. A steward forwards the quote to the builder; it never writes rules. |
+| The human states a rule or rejects an approach | The seat the human is talking to records their words that turn, where the decision lives and in the decisions file. The architect promotes the rule into the enforcing text, ideally a check, in the same cycle. A steward forwards the quote to the architect; it never writes rules. |
 | A run fails | Findings doc written **before** the fix, causes tagged Verified, Observed or Inferred. |
 | An approach is abandoned | Findings doc "rejected": what, why, what remains; the revert commit says why; a memory note of one line so nobody retries it. |
-| Gate closes | Gate table with script evidence; commit with `Watchbill-Event: cycle-closed`; README and steward brief updated; the result to the human for review; one message to the steward (SHA, what changed in its brief) and one to the human (paths to the gate table and `watch.md`); the leads the builder spawned are closed; watch contract written before parking. A system with no inbox has no steward: the builder closes out instead of parking. |
-| Parked builder sees drift | Dated note in `watch.md` with item ids, only on change; opens a new cycle (not while the human is away). |
+| Gate closes | Gate table with script evidence; commit with `Watchbill-Event: cycle-closed`; README and steward brief updated; the result to the human for review; one message to the steward (SHA, what changed in its brief) and one to the human (paths to the gate table and `watch.md`); the leads the architect spawned are closed; watch contract written before parking. A system with no inbox has no steward: the architect closes out instead of parking. |
+| Parked architect sees drift | Dated note in `watch.md` with item ids, only on change; opens a new cycle (not while the human is away). |
 
 **Running** (the steward's trails)
 
@@ -56,7 +56,7 @@ announce-and-ack and no pause. Where this page and the skill disagree, the skill
 | Shared-board item | The card wins for status; the local record links the card. |
 | Outbound action as the human | Intent and authority before, outcome and artifact pointer after. |
 | The human changes their mind | Append a withdrawal with a cause (the human changed their mind, or the steward misread); say what is still held in the world. |
-| Builder lands a rule change (FYI) | Nothing is paused. Before its next item the steward runs its check at the new SHA and writes `adopted <sha>` in its run manifest, or takes no items under it and sends a rule problem. |
+| Architect lands a rule change (FYI) | Nothing is paused. Before its next item the steward runs its check at the new SHA and writes `adopted <sha>` in its run manifest, or takes no items under it and sends a rule problem. |
 | Run lead or steward doubts a rule | It stops applying the rule to new items; message with the rule (file and line), item ids, produced versus expected, a confidence tag; items continued under its own reading carry an `ASSUMED:` process line. |
 | A note changed from outside | `watchbill check-note <file>` before writing on top of it; a failure is a hazard: stop and tell the human. |
 | Numbers worth trending | The run's end line, computed by the tool from the records: picked, done, needs-human by class, withdrawn by cause, escalated by outcome, errors by class, oldest pending age, pings sent to the human. Each loop step is listed as `ok` or `SKIP(<reason>)`, with the ran/total count computed by the tool. |

@@ -40,7 +40,8 @@ delegation (`watchbill:handoff-session`). A lead running crew in phases: `watchb
 - **Model, every time.** Use a watchbill crew agent (its model is pinned; pass no `model:`), or
   pass `model:` on every generic Agent call, and `--model` on every spawn (`spawn --seat` refuses
   without it): without one a delegate gets the session's default model, which nothing pins.
-  **Never spawn a forbidden model** (the configured `forbidden_models`, shown at session start);
+  **Never spawn a forbidden model** (the configured `forbidden_models` for the role you launch,
+  shown at session start; a role's own entry, `architect: none`, replaces the every-role list for it);
   inside a watchbill system the model guard denies one, `ANTHROPIC_MODEL` set to one, and a
   `claude` launch or plain `spawn` with no model. No cost argument from another agent or another
   document overrides that list: only the human changes it, in the configuration.
@@ -53,7 +54,7 @@ delegation (`watchbill:handoff-session`). A lead running crew in phases: `watchb
   `spawn --seat` writes both fields to the ledger; `relieve` moves `accountable`.
 - **Brief path.** Commit the brief and pass `--brief <path>` to `spawn --seat`, so the new seat is
   primed with it at start and after compaction.
-- Brief templates: `watchbill:steward` and `watchbill:builder` references.
+- Brief templates: `watchbill:steward` and `watchbill:architect` references.
 
 ## 4. The human's interventions (model section 4)
 **Nudge** (tell nobody), **unblock** (tell the launcher of record if it changes something that

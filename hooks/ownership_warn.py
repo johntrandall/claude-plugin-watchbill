@@ -12,19 +12,23 @@ Owners file format (YAML; a plain subset is parsed if PyYAML is missing):
 
     version: 1
     owners:                       # seat, agent type or agent name -> path globs
-      builder: [README.md, dev-docs/**, .claude-plugin/**]
-      watchbill-build-agents: [agents/**, hooks/**, skills/**, evals/**]
+      architect: [README.md, dev-docs/**, .claude-plugin/**]
+      watchbill-rules-agents: [agents/**, hooks/**, skills/**, evals/**]
     shared: [dev-docs/runs/**]    # anyone may write these
 
 Who is writing: every identity the session has, so an owners key may name a seat
-kind (`builder`) or an agent name (`events-build-sync`) and the rightful owner is never
+kind (`architect`) or an agent name (`events-rules-sync`) and the rightful owner is never
 warned. The identities: WATCHBILL_SEAT (the seat kind `spawn --seat` sets) and
 WATCHBILL_SEAT_NAME (its agent name); the hook input's `agent_type` (a plugin agent
-such as `watchbill:builder` counts as `builder`); and the herdr agent name from
+such as `watchbill:architect` counts as `architect`); and the herdr agent name from
 `herdr-lifecycle whoami`. An agent name also stands for its `-hoN` origin and for its
 seat kind (from the handoff ledger's spawn row, else from the name's shape). A path no
 owner lists is not checked, and the identity is looked up only when a target path has
 an owner (so a read-only Bash call costs no whoami).
+
+Read old, write new (0.4.0): a seat kind also stands for its 0.3 name and back, so an
+owners key `builder` or `build-lead` still names the architect or a rules lead, and a
+seat started before the rename (WATCHBILL_SEAT=builder) still owns an `architect` key.
 """
 import fnmatch
 import json
@@ -135,8 +139,20 @@ def herdr_agent_name():
     return None
 
 
-SEAT_SHAPES = ((r"-builder(-ho\d+)?$", "builder"), (r"-steward(-ho\d+)?$", "steward"),
-               (r"-build-", "build"), (r"-run-", "run"), (r"-advisor(-|$)", "advisor"))
+SEAT_SHAPES = ((r"-architect(-ho\d+)?$", "architect"), (r"-builder(-ho\d+)?$", "architect"),
+               (r"-steward(-ho\d+)?$", "steward"), (r"-rules-", "rules"), (r"-build-", "rules"),
+               (r"-run-", "run"), (r"-advisor(-|$)", "advisor"))
+# The names one seat kind has had: any one of them in a session's identities brings the rest.
+SEAT_SYNONYMS = ({"architect", "builder"}, {"rules", "rules-lead", "build", "build-lead"})
+
+
+def with_synonyms(names):
+    out = list(names)
+    for name in names:
+        for group in SEAT_SYNONYMS:
+            if name in group:
+                out += sorted(group)
+    return list(dict.fromkeys(out))
 
 
 def ledger_path():
@@ -146,7 +162,7 @@ def ledger_path():
 
 def seat_kind_of(name):
     """The seat kind of an agent name: the newest spawn or relieve row naming it in the handoff
-    ledger, else the name's shape (`<subject>-builder`, `<subject>-build-<task>`, ...)."""
+    ledger, else the name's shape (`<subject>-architect`, `<subject>-rules-<task>`, ...)."""
     seat = ""
     try:
         with open(ledger_path(), errors="replace") as handle:
@@ -196,7 +212,7 @@ def identities(hook_input, agent_name=None):
     agent_name = herdr_agent_name() if agent_name is None else agent_name
     if agent_name:
         names += name_identities(agent_name)
-    return list(dict.fromkeys(names))
+    return with_synonyms(list(dict.fromkeys(names)))
 
 
 HEREDOC = re.compile(r"(<<-?[ \t]*(['\"]?)(\w+)\2)([^\n]*)\n.*?\n[ \t]*\3[ \t]*(?=\n|$)", re.DOTALL)

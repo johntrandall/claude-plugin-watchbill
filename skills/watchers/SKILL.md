@@ -10,7 +10,7 @@ tags: [agents, watching, monitor, watchbill]
 
 Choosing the mechanism, the planned shared tool and the open gaps: `references/pattern.md`. The
 shared `watchbill-watch` tool is planned, not built: until it exists, start from
-`criticmarkup.py watch` (review marks) or write a one-shot script that follows the contract.
+`obsidian-track-changes-agent watch` (review marks) or write a one-shot script that follows the contract.
 
 ## The contract
 1. **Detect only.** The woken seat decides and acts. A change needing no judgment is a reactor
@@ -47,8 +47,8 @@ shared `watchbill-watch` tool is planned, not built: until it exists, start from
 | Seat | Watches | Mechanism |
 |---|---|---|
 | Steward | inbox, the human's decisions | long-lived Monitor in its own session, persisted seen-state |
-| Editor | the human's review marks | one-shot background `criticmarkup.py watch`, re-armed after each finding |
-| Parked builder (`👁`, alive) | outcomes and telemetry | the watch contract `dev-docs/watch.md`, a Monitor in its own session |
+| Editor | the human's review marks and their accept/reject decisions on its cards | one-shot background `obsidian-track-changes-agent watch`, re-armed after each finding (`watchbill:collaborative-drafting` rule 6) |
+| Parked architect (`👁`, alive) | outcomes and telemetry | the watch contract `dev-docs/watch.md`, a Monitor in its own session |
 | Any seat | its own context | the context hook, once per band; `watchbill context` on demand |
 | Nobody | deterministic reactions | a reactor service |
 

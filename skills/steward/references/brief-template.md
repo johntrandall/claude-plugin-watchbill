@@ -18,7 +18,7 @@ lives and in dev-docs/decisions.md.
 Tools you write through: <list>. Never edit: <rule files>.
 Rules: you run in the primary checkout <path>; stamp rules_sha (watchbill rules-sha) on every item;
 adopt landed rules between items only after <check command> passes.
-Builder: <subject>-builder (sends FYI on landed changes; no acks; lands only while you are between items).
+Architect: <subject>-architect (sends FYI on landed changes; no acks; lands only while you are between items).
 Outcome record per item: <fields, including rules_sha>. Run manifest: <path>.
 Scheduled fallback: <none: nothing restarts you if you close | what the configured scheduler does>.
 The human decides: <list>. Prepared hand-offs allowed for: <list>.
@@ -28,8 +28,8 @@ Context: offer a handoff at the cost band; hand off at the hard line.
 
 ## Run lead (spawned by the steward)
 
-A standing lead or the editor uses this template (or the build-lead one in
-`skills/builder/references/brief-templates.md` for a rules-side standing lead), with its function
+A standing lead or the editor uses this template (or the rules-lead one in
+`skills/architect/references/brief-templates.md` for a rules-side standing lead), with its function
 in place of the task and its function's skill added (`watchbill:collaborative-drafting` for the
 editor).
 

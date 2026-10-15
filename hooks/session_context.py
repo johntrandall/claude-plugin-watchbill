@@ -53,7 +53,7 @@ def seat_of_session(hl, sid, events):
     if row and not seat:
         seat = row.get("seat") or ""
         name = name or row.get("name") or row.get("receiver_name") or ""
-    return seat, name, row
+    return hl.norm_seat(seat) or seat, name, row  # a 0.3 seat (builder, build) reads as the new kind
 
 
 def brief_of(seat_name, row, system, wb):
@@ -95,7 +95,7 @@ def primer(seat, name, row, system, source, hl, wb, events, sid):
     else:
         lines.append(f"No brief is recorded for you (spawn --brief, the ledger, the roster's Brief column): "
                      f"ask your launcher or {config.get('human_name')} for it.")
-    ids = list(dict.fromkeys([seat] + (ownership.name_identities(name) if name else [])))
+    ids = ownership.with_synonyms(list(dict.fromkeys([seat] + (ownership.name_identities(name) if name else []))))
     own = owned_paths(system, ids)
     if own is None:
         lines.append("The system has no dev-docs/owners.yaml: write only what your brief assigns.")

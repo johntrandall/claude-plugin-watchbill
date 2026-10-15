@@ -1,6 +1,6 @@
 ---
 name: backfill
-description: "watchbill crew BACKFILL: applies one landed rule change to existing records, in one commit with a Watchbill-Event: backfilled trailer. Use when a builder lands a rule that existing records must catch up with."
+description: "watchbill crew BACKFILL: applies one landed rule change to existing records, in one commit with a Watchbill-Event: backfilled trailer. Use when an architect lands a rule that existing records must catch up with."
 model: sonnet
 effort: medium
 color: yellow

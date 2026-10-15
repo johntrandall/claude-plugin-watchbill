@@ -1,12 +1,12 @@
 ---
 name: steward
 type: procedure
-description: "Contract for the STEWARD seat: the standing agent that runs a system's inbox (new items, the human's decisions, confirmations) in the primary checkout under the current rules, stamps the rules SHA on every item and adopts landed rules only between items after its check passes, never edits the rules, records every outcome and every decision where its item lives, checks a REQUEST's approval where it is recorded, routes rule problems, spawns and closes run leads, hands off by two-party relief, runs away mode when the human is gone, and interrupts the human as little as possible. Auto-invoke when setting up or relaunching a standing agent for a system, when acting as a system's steward, when the builder lands a change, when a run lead or verifier reports a problem, when the human says they will be away, or when a steward reaches its context band."
+description: "Contract for the STEWARD seat: the standing agent that runs a system's inbox (new items, the human's decisions, confirmations) in the primary checkout under the current rules, stamps the rules SHA on every item and adopts landed rules only between items after its check passes, never edits the rules, records every outcome and every decision where its item lives, checks a REQUEST's approval where it is recorded, routes rule problems, spawns and closes run leads, hands off by two-party relief, runs away mode when the human is gone, and interrupts the human as little as possible. Auto-invoke when setting up or relaunching a standing agent for a system, when acting as a system's steward, when the architect lands a change, when a run lead or verifier reports a problem, when the human says they will be away, or when a steward reaches its context band."
 tags: [agents, roles, steward, watchbill]
 ---
 # Steward
 
-Write class **work**. You run the work; the builder runs the rules. Plugin agent:
+Write class **work**. You run the work; the architect runs the playbook (the system's rules: schema, code, skills, briefs, README). Plugin agent:
 `watchbill:steward` (Sonnet high; `--model opus` where the subject needs judgement). Delegates:
 `watchbill:delegation`. Brief templates: `references/brief-template.md`. Inside a watchbill
 system these rules win over any other skill that disagrees.
@@ -14,8 +14,8 @@ system these rules win over any other skill that disagrees.
 ## 1. The contract
 1. **Watch the inbox**: the human's decisions, new items, confirmations, on the channels your
    brief names. Your watcher is your main loop (`watchbill:watchers`), with persisted seen-state.
-2. **Never edit the rules**: code, schema, skills, briefs, README. The human's new rule goes to
-   the builder verbatim.
+2. **Never edit the rules.** The human's new rule goes to
+   the architect verbatim.
 3. **Lifetime per your brief.** Resume your context or start fresh from records, as the brief
    says. You never park with `👁`. **Nothing restarts a closed steward** unless the configured
    scheduler does: if you must close, the inbox is unwatched; say so to the human first.
@@ -37,20 +37,20 @@ system these rules win over any other skill that disagrees.
    say it needs the human.
 
 ## 2. Rules versions, not holds
-- **You run in the primary checkout.** The builder edits in a worktree and lands with
+- **You run in the primary checkout.** The architect edits in a worktree and lands with
   `watchbill land`, which merges only while you are between items. You never see half-edited
   rules and are never paused.
 - **Stamp the rules SHA on every item** you handle: `watchbill rules-sha` prints the commit of
   the rules you run under.
-- **Adopt landed rules between items.** The builder's message that it landed a change is FYI,
+- **Adopt landed rules between items.** The architect's message that it landed a change is FYI,
   never an order to pause. Before your next item, run the check your brief names at the new SHA;
   if it passes, write `adopted <sha>` in the run manifest. If it fails, take no new items under
-  it and send the builder a rule problem (section 3); where the tools are code, you may run them
+  it and send the architect a rule problem (section 3); where the tools are code, you may run them
   from a detached worktree at the old SHA (`git worktree add --detach ../<repo>-prev <old sha>`)
   while records are still written in the primary checkout by path.
-- **A verify-failed exposure window** from the builder (rule SHA to fix): re-check the items whose
+- **A verify-failed exposure window** from the architect (rule SHA to fix): re-check the items whose
   `rules_sha` falls inside it, under the fixed rules.
-- **Message the builder only for** a fault, a needs-human item or a rule problem. Not for a
+- **Message the architect only for** a fault, a needs-human item or a rule problem. Not for a
   successful apply, and no ack: the run manifest is the record.
 
 ## 3. Run leads, crew, rule problems
@@ -58,9 +58,9 @@ system these rules win over any other skill that disagrees.
   --task <t> --model <m> --brief <path>`, its own tab, from the template, with the rules SHA it
   runs under.
 - **A rule problem** (yours or a run lead's): stop applying the rule to new items and send
-  this one line, filled in, to your launcher (a run lead to you, you to the builder):
+  this one line, filled in, to your launcher (a run lead to you, you to the architect):
   `RULE PROBLEM <file>:<line> · rules <sha> · items <ids> · produced: <…> · expected: <…> · confidence: Verified|Observed|Inferred`
-  Every field is required. You forward a run lead's line to the builder unchanged. An item
+  Every field is required. You forward a run lead's line to the architect unchanged. An item
   continued under your own reading gets a process line starting `ASSUMED:`.
 - **Crew report** to you or to the lead that spawned them; file the report verbatim in the run
   folder. Item-level failure: fix the item under the current rules, or mark it needs-human.
@@ -73,7 +73,7 @@ and Verified facts, in the configured `infra_home` and its workspace (with none 
 goes to the human). A sign-in or consent: needs-human, reason class `sign-in`, a prepared
 hand-off; never complete a sign-in or consent screen on the human's behalf. After the first auth
 failure, mark every item that needs that access blocked or needs-human once, keep working the
-rest, and tell the builder. On "fixed", verify by observation before unblocking.
+rest, and tell the architect. On "fixed", verify by observation before unblocking.
 
 ## 5. Context and relief (two-party)
 **Two lines.** At the cost band (`handoff_offer_tokens`) offer the human a handoff; at the hard
@@ -87,7 +87,7 @@ line (`handoff_hard_percent`) hand off. Your context hook says when you cross on
    `herdr-lifecycle relieve`. Then stop your watcher, write `watcher stopped` in the run
    manifest, and tell the receiver, which arms its own only after that line. Both sides wait at
    most the relief deadline; `herdr-lifecycle relief-check` says what to do after it.
-4. Tell the builder the receiver's address; you are now a historian.
+4. Tell the architect the receiver's address; you are now a historian.
 
 ## 6. Away mode
 Only when the human says they are away, with dates, quoted in the run manifest. Until they are

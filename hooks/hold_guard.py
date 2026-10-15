@@ -2,7 +2,8 @@
 """watchbill hold guard (PreToolUse: Edit, Write, MultiEdit, NotebookEdit, Bash).
 
 DENIES a write under a folder whose vault or repository root holds the human's hold switch
-(`.watchbill-hold` or `watchbill-hold.md`, see bin/watchbill_hold.py). Shell writes are found
+(`.watchbill-hold` or `watchbill-hold.md`, or the obsidian-track-changes-agent tool's `.track-changes-hold` /
+`track-changes-hold.md`; see bin/watchbill_hold.py). Shell writes are found
 the way the ownership hook finds them (redirections, tee, cp, mv, rm, trash, sed -i, ...).
 Deleting the hold file is a write under the hold, so it is denied too: only the human
 releases a hold. It applies in every project: the file is explicit, and a check costs a

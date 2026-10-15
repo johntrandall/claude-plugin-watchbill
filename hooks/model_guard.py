@@ -2,8 +2,11 @@
 """watchbill model guard: forbidden models hold by construction, and every start names a model.
 
 PreToolUse hook for Agent (and its older name Task) and Bash. Configuration (watchbill
-config): forbidden_models (empty by default: nothing is forbidden) and
-require_explicit_model (default true). Inside a watchbill system (a repository with
+config): forbidden_models (empty by default: nothing is forbidden; an entry `<role>: <models>`
+is one role's own list, so `haiku, architect: none` forbids haiku for everyone but the
+architect) and require_explicit_model (default true). The role checked is the one being
+launched: an Agent call's watchbill subagent_type, a `claude --agent watchbill:<role>`, a
+`spawn --seat <kind>`; anything else gets the every-role list. Inside a watchbill system (a repository with
 dev-docs/owners.yaml) or in a watchbill plugin agent:
 
   Agent    DENIES a call whose model is forbidden; with require_explicit_model, reminds
@@ -61,14 +64,15 @@ def setting(key):
     return _settings[key]
 
 
-def forbidden(model):
-    """The forbidden model this name matches, or ''."""
-    return config.is_forbidden_model(model, setting("forbidden_models"))
+def forbidden(model, role=""):
+    """The forbidden model this name matches for the launched role, or ''."""
+    return config.is_forbidden_model(model, setting("forbidden_models"), role)
 
 
-def never(model):
-    return (f"watchbill: {model} is a forbidden model in this configuration (forbidden_models: "
-            f"{', '.join(setting('forbidden_models'))}). Pick another model.")
+def never(model, role=""):
+    where = f"for role {role}" if role else "here"
+    return (f"watchbill: {model} is a forbidden model {where} in this configuration (forbidden_models: "
+            f"{'; '.join(setting('forbidden_models'))}). Pick another model.")
 
 
 def settings_default_model():
@@ -160,38 +164,45 @@ def bash_verdict(command):
                 i += 1
             else:
                 break
-        if forbidden(env.get(MODEL_ENV, "")):
-            return never(forbidden(env[MODEL_ENV]))
         if i >= len(words):
+            if forbidden(env.get(MODEL_ENV, "")):
+                return never(forbidden(env[MODEL_ENV]))
             continue
         word, args = os.path.basename(words[i]), words[i + 1:]
         env_model = env.get(MODEL_ENV) or exported.get(MODEL_ENV) or ""
+        claude_args = args[args.index("--") + 1:] if "--" in args else []
+        role = ""  # the launched role: --agent watchbill:<role>, or spawn --seat <kind>
+        if word == "claude":
+            role = config.role_name(flag_value(args, "--agent") or "")
+        elif word == "herdr-lifecycle" and args[:1] == ["spawn"]:
+            role = config.role_name(flag_value(args, "--seat") or flag_value(claude_args, "--agent") or "")
+        if forbidden(env.get(MODEL_ENV, ""), role):
+            return never(forbidden(env[MODEL_ENV], role), role)
         if word == "claude":
             positional = [a for a in args if not a.startswith("-")]
             if INFO_FLAGS & set(args) or (positional and positional[0] in NO_SESSION
                                           and args.index(positional[0]) == 0):
                 continue
             model = flag_value(args, "--model")
-            if model and forbidden(model):
-                return never(forbidden(model))
-            if not model and env_model and forbidden(env_model):
-                return never(forbidden(env_model))
+            if model and forbidden(model, role):
+                return never(forbidden(model, role), role)
+            if not model and env_model and forbidden(env_model, role):
+                return never(forbidden(env_model, role), role)
             if not model and not env_model:
                 if setting("require_explicit_model"):
                     return NO_MODEL
                 default = settings_default_model()
-                if forbidden(default):
+                if forbidden(default, role):
                     return (f"watchbill: this starts a Claude session with no model, so it gets the settings "
                             f"default {default}, a forbidden model. Pass --model with an allowed model.")
         elif word == "herdr-lifecycle" and args[:1] == ["spawn"]:
             model = flag_value(args, "--model")
-            if model and forbidden(model):
-                return never(forbidden(model))
-            claude_model = flag_value(args[args.index("--") + 1:] if "--" in args else [], "--model")
-            if claude_model and forbidden(claude_model):
-                return never(forbidden(claude_model))
+            if model and forbidden(model, role):
+                return never(forbidden(model, role), role)
+            claude_model = flag_value(claude_args, "--model")
+            if claude_model and forbidden(claude_model, role):
+                return never(forbidden(claude_model, role), role)
             if "--seat" not in args and setting("require_explicit_model"):  # spawn --seat requires --model itself
-                claude_args = args[args.index("--") + 1:] if "--" in args else []
                 if not flag_value(claude_args, "--model"):
                     return ("watchbill: a plain `herdr-lifecycle spawn <name>` passes no model unless you give "
                             "one after `--` (`-- --model opus`); without it the session gets the settings.json "
@@ -211,8 +222,9 @@ def main():
     if tool in ("Agent", "Task"):
         model = str(tool_input.get("model") or "")
         kind = str(tool_input.get("subagent_type") or "")
-        if forbidden(model):
-            respond("deny", never(forbidden(model)) + " Or use a watchbill crew type, which pins its own model.")
+        role = config.role_name(kind) if kind.startswith("watchbill:") else ""
+        if forbidden(model, role):
+            respond("deny", never(forbidden(model, role), role) + " Or use a watchbill crew type, which pins its own model.")
         elif not model and not kind.startswith("watchbill:") and setting("require_explicit_model"):
             respond(context="watchbill: this Agent call names no model, so it gets whatever the session or "
                             "settings default is, which nothing pins. Pass model explicitly, or use a watchbill "

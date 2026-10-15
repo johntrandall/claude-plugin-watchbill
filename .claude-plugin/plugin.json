@@ -1,7 +1,7 @@
 {
   "name": "watchbill",
-  "version": "0.3.2",
-  "description": "A role model for multi-agent work in herdr with a human in the loop: builder and steward side by side, build and run leads, pinned crew sub-types, a delegation layer for launching and closing delegates, an editor for collaborative drafting, two-party handoff with historians, paper-trail rules and the watcher contract. One seat changes the rules, another runs the work, and every relief leaves a log.",
+  "version": "0.4.2",
+  "description": "A role model for multi-agent work in herdr with a human in the loop: the Playbook Architect and the steward side by side, rules and run leads, pinned crew sub-types, a delegation layer for launching and closing delegates, an editor for collaborative drafting, two-party handoff with historians, paper-trail rules and the watcher contract. One seat changes the playbook, another runs the work, and every relief leaves a log.",
   "author": {
     "name": "John Randall",
     "url": "https://github.com/johntrandall"
@@ -24,7 +24,7 @@
     "forbidden_models": {
       "type": "string",
       "title": "Forbidden models",
-      "description": "Models no seat may spawn or launch (for example one your plan cannot afford). The model guard denies them and spawn refuses them. Default: none.",
+      "description": "Models no seat may spawn or launch (for example one your plan cannot afford), per role: `fable` forbids it for every role; `architect: none` or `steward: fable haiku` is that role's own list. The role is the one being launched. The model guard denies them and spawn refuses them. Default: none.",
       "multiple": true,
       "default": []
     },
@@ -49,7 +49,7 @@
     "drafting_tool": {
       "type": "string",
       "title": "Drafting tool",
-      "description": "The Track Changes command line tool the editor and checkers use. Empty: the copy bundled in this plugin's bin/.",
+      "description": "The Track Changes command line tool the editor and checkers use: a command on PATH or a path to one with the same subcommands. Empty: `obsidian-track-changes-agent`, the obsidian-track-changes-agent plugin's command.",
       "default": ""
     },
     "drafting_author": {

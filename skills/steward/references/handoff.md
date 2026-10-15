@@ -1,6 +1,6 @@
 # Relief: a seat's two-party handoff
 
-For the steward, the builder and every standing seat. Two seats never own one resource at once:
+For the steward, the architect and every standing seat. Two seats never own one resource at once:
 an overlap of two seats on one record corrupts it, and two watchers on one target steal each
 other's findings. So the origin owns the seat until the receiver takes it, in two steps.
 
@@ -11,8 +11,8 @@ other's findings. So the origin owns the seat until the receiver takes it, in tw
    start a little early: the procedure itself needs about 30K tokens.
 2. **Start between items, never mid-item.** Finish the current item or leave it untouched.
 3. **Write and commit the brief** in the project: the seen-state path, your rules SHA, open
-   escalations and needs-human items, the other side's address (the builder for a steward, the
-   steward for a builder), the run manifest path, whether the receiver resumes or starts fresh,
+   escalations and needs-human items, the other side's address (the architect for a steward, the
+   steward for an architect), the run manifest path, whether the receiver resumes or starts fresh,
    and the authority line ("Your launcher of record is <session-id>…").
 4. **Run `herdr-lifecycle handoff <name>-hoN --brief <path>` first.** It refuses unless the brief
    exists and is committed, records the handoff with its relief deadline
@@ -23,10 +23,10 @@ other's findings. So the origin owns the seat until the receiver takes it, in tw
    another reason.
 6. **You still own the seat** until the receiver runs `herdr-lifecycle relieve`. Keep your
    watcher and keep handling items between its steps; the receiver arms nothing yet.
-   **The receiver's half:** run `herdr-lifecycle relieve --watch <run manifest, or a builder's
+   **The receiver's half:** run `herdr-lifecycle relieve --watch <run manifest, or an architect's
    dev-docs/watch.md>`, send the origin the `tell_origin` line it prints (nothing else tells the
    origin), then wait for the line `watcher stopped` there.
-7. **On relief:** stop your watcher, write `watcher stopped` in the run manifest (a builder: in
+7. **On relief:** stop your watcher, write `watcher stopped` in the run manifest (an architect: in
    `dev-docs/watch.md`), and message the receiver. The receiver arms its own watcher only after
    that line exists. The handoff ledger's `accountable` moves to the receiver; `launched_by`
    stays.
@@ -35,7 +35,7 @@ other's findings. So the origin owns the seat until the receiver takes it, in tw
    the origin is gone: the receiver takes the seat (a `takeover` row is written, its tab gets `?`
    with reason `relief`), arms its watcher and tells the human. Exit 4: the deadline passed and
    the other party is still live: `?` with reason `relief`, tell the human; nobody takes over.
-9. **Tell the other side** (builder or steward) the receiver's address. You are now a historian:
+9. **Tell the other side** (architect or steward) the receiver's address. You are now a historian:
    answer history questions only (`watchbill:historian`). A historian of a standing chain may
    exit once `herdr-lifecycle historian-check` exits 0 (its successor has run `relieve`).
 10. The receiver's address is `<name>-hoN`.

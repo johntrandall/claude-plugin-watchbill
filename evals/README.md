@@ -6,8 +6,8 @@ unscored indicator that a `watchbill:` skill loaded.
 
 | Case | Tests | Prompt names a skill |
 |---|---|---|
-| `gate-closed` | builder at the gate: `cycle-closed` trailer, closes its leads, the result for review, `watch.md`, parks with `👁` in place, no scheduled wake | yes |
-| `builder-announces-change` | worktree, merge with `landed` trailers, FYI with no ack wait | yes |
+| `gate-closed` | architect at the gate: `cycle-closed` trailer, closes its leads, the result for review, `watch.md`, parks with `👁` in place, no scheduled wake | yes |
+| `architect-announces-change` | worktree, merge with `landed` trailers, FYI with no ack wait | yes |
 | `context-85` | steward relief: `handoff --brief`, owns the seat until `relieve`, new tab, explicit model that is not forbidden | yes |
 | `run-lead-rule-problem` | rule problem routed with file and line, ids, produced vs expected, confidence tag; no rule edit | yes |
 | `verifier-fails` | `verify-failed` trailer, exposure window by rules SHA, at most 5 rounds | yes |

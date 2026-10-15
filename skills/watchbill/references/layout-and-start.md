@@ -5,15 +5,15 @@ Read when you start a system, spawn a seat, or name or relabel a tab.
 ## Layout
 - **One herdr workspace per system**, labelled by the configured `workspace_label` (default
   `<SUBJECT> system`). Every seat lives there.
-- **Agent name = Claude `-n` address = tab slug:** `<subject>-builder`, `<subject>-steward`,
-  `<subject>-build-<task>`, `<subject>-run-<task>`, `<subject>-<function>` for a standing lead or
+- **Agent name = Claude `-n` address = tab slug:** `<subject>-architect`, `<subject>-steward`,
+  `<subject>-rules-<task>`, `<subject>-run-<task>`, `<subject>-<function>` for a standing lead or
   the editor (`report-editor`, `report-layout`), `<subject>-advisor[-<topic>]`. Keep the subject
   token to 8 characters and the task token to 10: the sidebar cuts labels at about 25 characters
   (`spawn --seat` warns when longer). Successor of any seat: `<name>-ho2`
   (`herdr-lifecycle next-name`).
-- **Labels, glyph first:** `_ EVENTS BUILDER`, `_ EVENTS STEWARD`, `EVENTS BUILD · routing`,
-  `EVENTS RUN · bookings`, `REPORT EDITOR`, `REPORT LAYOUT`, `↪ EVENTS BUILDER → ho2`.
-- **Order:** builder, steward, build leads, run leads, standing leads (build or run) in the order
+- **Labels, glyph first:** `_ EVENTS ARCHITECT`, `_ EVENTS STEWARD`, `EVENTS RULES · routing`,
+  `EVENTS RUN · bookings`, `REPORT EDITOR`, `REPORT LAYOUT`, `↪ EVENTS ARCHITECT → ho2`.
+- **Order:** the Playbook Architect, steward, rules leads, run leads, standing leads (rules or run) in the order
   they were started, advisors, historians last. A successor takes its origin's slot.
   `spawn --seat` places the tab.
 - **Glyphs** (the lifecycle mark at the front of the tab label; set them with `herdr-lifecycle label <state>`, never by hand; a pane's state badge, `herdr pane report-metadata --state-label`, is separate and may be stamped directly):
@@ -23,7 +23,8 @@ Read when you start a system, spawn a seat, or name or relabel a tab.
 | none or `_` | active (`_` = the live lead of its workspace) | `active` |
 | `⏳` | waiting on someone or something other than the human | `waiting` |
 | `?` | stopped on the human. Reason class in parentheses at the end: `? EVENTS STEWARD (sign-in)`. The workspace label carries `?` while any of its tabs does; every `label` call re-syncs it. Clear it when the human answers. | `human --reason <class>` |
-| `👁` | parked builder, alive, watch armed | `watching`, or `herdr-lifecycle park` |
+| `👁` | parked architect, alive in its own system's workspace, watch armed: it opens a cycle on drift | `watching`, or `herdr-lifecycle park` |
+| `📡` | monitoring from a shelf: alive, acts itself when its condition fires (a daily scan, a health check); never a seat of a system | `monitoring`, or `herdr-lifecycle shelve monitoring` (`watchbill:herdr-workspace-placement`) |
 | `↪` | relief in progress from `handoff` until the receiver runs `relieve`; after that, historian | set by `handoff` |
 | `✓` | done, for the human's review | `review` |
 | `💤` | process exited, resume line typed | `parked` |
@@ -31,7 +32,7 @@ Read when you start a system, spawn a seat, or name or relabel a tab.
 - **Tab or pane:** a tab for anything working on a different thing, which includes every seat
   and every fork. A pane (`--pane`) only for something short-lived and closely paired with the
   tab's resident: a teammate, a sub-agent you want to watch, a process.
-- **Spawn a seat:** `herdr-lifecycle spawn --seat builder|steward|build|run|standing|advisor
+- **Spawn a seat:** `herdr-lifecycle spawn --seat architect|steward|rules|run|standing|advisor
   --subject <s> [--task <t>] --model <m> [--effort <e>] [--cwd <subject home>]
   [--agent watchbill:<agent>] [--resume <session-id>]`. It builds the name and label, sets
   `WATCHBILL_SEAT` for the new session, opens a new tab in its slot, **requires `--model` and
@@ -41,7 +42,7 @@ Read when you start a system, spawn a seat, or name or relabel a tab.
 - **A `✓` tab closes itself** when the done signal its brief names appears (a file it can read,
   every mark resolved, an artifact published; not a board card, which nothing polls cheaply):
   `herdr-lifecycle exit --done "<the signal it saw>"`. An advisor leaves the same way when its
-  question is answered. The human does not have to release either in words. A parked builder is
+  question is answered. The human does not have to release either in words. A parked architect is
   never `✓`: it parks with `👁`.
 - **A cross-subject fault** (infrastructure) goes to that subject's home, the configured
   `infra_home`, and its own workspace (`watchbill:infra-handoff`); it is not a seat of this
@@ -64,10 +65,10 @@ Read when you start a system, spawn a seat, or name or relabel a tab.
    section 3).
 4. **Create the workspace**: `herdr workspace create --label "<workspace label>" --cwd <subject
    home>` (`watchbill restore` finds it by that label, a leading `?` ignored), and pass
-   `--workspace` on every spawn. Spawn the builder (tab 0) from
-   `skills/builder/references/brief-templates.md`. When the steward's rules exist, spawn the
+   `--workspace` on every spawn. Spawn the architect (tab 0) from
+   `skills/architect/references/brief-templates.md`. When the steward's rules exist, spawn the
    steward (tab 1) in the primary checkout from `skills/steward/references/brief-template.md`. A
-   system with no inbox has no steward; its builder closes out after the gate instead of parking.
+   system with no inbox has no steward; its architect closes out after the gate instead of parking.
 5. **Scheduled fallback.** With the configured `scheduler` at `none`, write "none" in the roster
    and tell the human that nothing restarts a seat that dies until they or `watchbill restore`
    do. With a scheduler, the roster names what it restarts.

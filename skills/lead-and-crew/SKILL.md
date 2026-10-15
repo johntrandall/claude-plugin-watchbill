@@ -1,7 +1,7 @@
 ---
 name: lead-and-crew
 type: procedure
-description: "How a lead runs a multi-step change with a crew: a task list with dependencies, phases of parallel crew in worktrees (watchbill crew sub-agents, or herdr worktree workers of any agent kind), merging and verifying between phases, cleaning up worktrees, a final independent verifier, and the recovery cases. Auto-invoke when a lead or builder takes a change with five or more tasks and internal dependencies, or is asked to orchestrate a sweep, migration or refactor."
+description: "How a lead runs a multi-step change with a crew: a task list with dependencies, phases of parallel crew in worktrees (watchbill crew sub-agents, or herdr worktree workers of any agent kind), merging and verifying between phases, cleaning up worktrees, a final independent verifier, and the recovery cases. Auto-invoke when a lead or architect takes a change with five or more tasks and internal dependencies, or is asked to orchestrate a sweep, migration or refactor."
 tags: [agents, orchestration, worktrees, crew, watchbill]
 ---
 > Where a global skill disagrees with the watchbill plugin on a decided point, the plugin's rules win (list: `watchbill:watchbill`, top).
@@ -9,7 +9,7 @@ tags: [agents, orchestration, worktrees, crew, watchbill]
 
 # Lead and crew
 
-A lead (build or run, `watchbill:watchbill`) that owns a change of five or more tasks with
+A lead (rules or run, `watchbill:watchbill`) that owns a change of five or more tasks with
 dependencies runs it in phases: **task list → parallel crew per phase → merge and verify → next
 phase → independent verifier.** Fewer than three tasks: do them inline. All independent with no
 dependencies: one wave of crew in a single message. Whether to delegate at all, and the launch

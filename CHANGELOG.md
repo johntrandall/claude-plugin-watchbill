@@ -3,6 +3,93 @@
 Rules in the skills are stated as rules; this file keeps when each was decided and what it
 replaced.
 
+## 0.4.2 (2026-10-15)
+
+**Shelves have a return trip, and monitoring has its own glyph** (the human, 2026-10-15: "when agents
+actually have real work to do and they spawn other agents, they should hop out of whatever monitoring
+… or waiting workspace they're in and go into their own workspaces and then as they wind down they can
+go tuck themselves back away"; "glyphs are good … make sure that they are distinct and that they mean
+something"). `herdr-lifecycle shelve monitoring|waiting` moves a session's pane to the shelf (found by
+label or created), labels it glyph-first and records its home workspace; `unshelve` brings it back,
+recreating the home workspace when it closed; `spawn` unshelves first; `shelve` refuses while child
+`claude` processes run. New glyph `📡` = alive on a shelf, acts itself when its condition fires;
+`👁` stays the parked architect in its own workspace; `⏳` stays "someone else moves next". Was: a
+hand-run `herdr pane move` recipe that wrote a bare label, no monitoring glyph, no way back.
+
+**The configuration survives a plugin reinstall** (the human, 2026-10-15: "how to do that better so it
+doesn't get blown out again"; the path is the architect's choice). `watchbill_config` reads
+`~/.claude/watchbill.json` (`$CLAUDE_CONFIG_DIR/watchbill.json`; `$WATCHBILL_CONFIG_FILE` overrides)
+after the settings entry and before the default; `watchbill config --write-file` fills it from the
+resolved values; `--explain` names it; the session context says when nothing at all is configured.
+Was: `pluginConfigs` in `settings.json` only, which a marketplace re-registration emptied that day.
+
+**The editor fields the human's decisions, not only their marks** (`collaborative-drafting` rule
+6; was: `watch` woke on new marks only, so an accept or reject of the editor's card went
+unnoticed until the next mark). From obsidian-track-changes-agent 0.1.6 `watch` also exits 0 when
+the human accepts or rejects an agent's card ("your decision: …"; JSON `"decided": true`). The
+editor notes each decision, runs `tidy` once a `block` is fully resolved, and never proposes a
+rejected change again unless asked. The watchers table's editor row says so.
+
+## 0.4.1 (2026-10-15)
+
+**The architect is pinned to Fable high** (was Opus high). The seat that changes a system's rules
+gets the most capable model; a plan that cannot afford it launches the seat with `--model opus`,
+recorded in the system's README roster, as the steward is launched with `--model opus` where
+judgement is needed. Every other seat and crew type keeps its pin. The guard is unchanged: a
+`forbidden_models` entry still refuses that model everywhere.
+
+**`forbidden_models` is per role.** A plain entry (`fable`) forbids a model for every role; an entry
+`<role>: <models>` (`architect: none`, `steward: fable haiku`) is that role's own list and replaces
+the every-role entries for it. The role checked is the one being launched: `spawn --seat <kind>`,
+`claude --agent watchbill:<role>`, an Agent call's watchbill `subagent_type`; a launch that names no
+role (a generic Agent call, a bare `claude`, `ANTHROPIC_MODEL`) gets the every-role list, so a seat
+allowed a model does not pass it to its delegates. Existing plain lists mean what they did.
+
+**The drafting tool is the `obsidian-track-changes-agent` plugin's, no longer bundled.** `bin/criticmarkup.py` is gone;
+`drafting_tool` defaults to the command `obsidian-track-changes-agent` on PATH (that plugin provides it; `obsidian-track-changes-agent
+install-links` links it), and still accepts a path. `watchbill status` and `check-note` report a missing
+tool by name. The hold switch honours that tool's names too (`.track-changes-hold`,
+`track-changes-hold.md`), so one hold stops both. The protocol (editor, checker, `collaborative-drafting`)
+stays here. `install-links` reads the plugins file under `$CLAUDE_CONFIG_DIR` (it read `~/.claude` only).
+
+**A seat blocked at startup is recorded, not lost.** `spawn --seat` moves the new tab to its slot
+before starting the agent, so a folder-trust dialog can no longer leave it last; when `herdr agent
+start` answers `agent_not_ready`, the spawn row is written with `startup: blocked` and the output
+names the next step (the human answers the dialog; the launcher sends the launch prompt by
+SendMessage; nothing retries the spawn). Before, the spawn died there with no row and no slot.
+**`relieve` moves the origin's tab to the historian slot** (after every seat tab), since relief is
+when the origin becomes a historian; `handoff` only relabels it, the origin owning the seat until
+then. The receiver's output says where the tab went (`origin_tab`).
+
+## 0.4.0 (2026-10-15)
+
+**The rules seat is the Playbook Architect.** "Builder" read as the seat that writes code, which
+is the workers' job. The set of rules a system runs on is its **playbook** (schema, code, skills,
+briefs, README); the seat that changes it is the Playbook Architect, short form the architect.
+Its task and standing leads are **rules leads**. Steward, run lead, standing, advisor, editor and
+every crew type keep their names; so do the `Watchbill-*` trailers and `build/*` branches.
+
+| Was | Now |
+|---|---|
+| seat kind `builder`, agent `watchbill:builder`, skill `watchbill:builder` | `architect`, `watchbill:architect`, `watchbill:architect` |
+| name `<subject>-builder`, tab `_ SUBJECT BUILDER` | `<subject>-architect`, `_ SUBJECT ARCHITECT` |
+| seat kind `build`, agent `watchbill:build-lead`, name `<subject>-build-<task>`, tab `SUBJECT BUILD · task` | `rules`, `watchbill:rules-lead`, `<subject>-rules-<task>`, `SUBJECT RULES · task` |
+| `WATCHBILL_SEAT=builder` / `build` | `architect` / `rules` |
+
+**Read old, write new.** Nothing written from 0.4.0 uses the old names; everything that reads
+still accepts them, so ledger rows, rosters, owners files and live tabs from 0.3 keep working:
+- `herdr-lifecycle spawn --seat builder|build` and `handoff --seat builder|build` mean architect
+  and rules; roster seat text "Builder", "Build lead" and agent types `watchbill:builder` /
+  `watchbill:build-lead` resolve the same way.
+- Names `<subject>-builder(-hoN)` and `<subject>-build-<task>` map to the new kinds (tab order,
+  lead mark, ownership). `watchbill restore` respawns a 0.3 roster row under its old name, so a
+  live address never changes.
+- Ledger rows with `"seat": "builder"` or `"build"` read as architect or rules (tab slot,
+  historian-check, relieve, the session primer). Ledger rows are never rewritten.
+- owners.yaml keys `builder`, `build` and `build-lead` still name the architect and rules leads
+  (ownership hook, session primer, `watchbill rules-sha`), and a session started before 0.4.0
+  (`WATCHBILL_SEAT=builder`) still owns an `architect` key.
+
 ## 0.3.2 (2026-10-14)
 
 **Configuration and publishing**

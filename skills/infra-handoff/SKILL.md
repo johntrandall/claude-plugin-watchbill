@@ -16,8 +16,11 @@ message the fixing orchestrator; you are not responsible for it.
 
 **Where it goes.** The home for infrastructure faults is `infra_home` in the session context. If
 none is configured, the fault goes to the human: write the brief (step 1) in your own project and
-ask the human where it should run. A fault in another subject that has its own home goes there
-the same way.
+ask the human where it should run. A fault or need in another subject that has its own home goes
+there the same way, and the receiver can be any agent type, not only an infrastructure
+orchestrator: in another watchbill system, a rule fault goes to that system's architect and an item
+to its steward. **If the owner is already live, send it the brief by message and skip steps 2 and
+3**; start a new orchestrator only when no live session owns that home.
 
 ## Steps
 1. **Freeze the facts** in a brief in the home's project area (its own conventions name the

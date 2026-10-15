@@ -1,6 +1,6 @@
 ---
 name: verifier
-description: "watchbill crew VERIFIER: checks a change or an item cold and reports pass or fail per check, with script evidence; writes nothing. Use after a build lead lands a change or before a gate closes."
+description: "watchbill crew VERIFIER: checks a change or an item cold and reports pass or fail per check, with script evidence; writes nothing. Use after a rules lead lands a change or before a gate closes."
 model: sonnet
 effort: high
 color: red

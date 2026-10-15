@@ -1,13 +1,13 @@
 ---
-name: builder
+name: architect
 type: procedure
-description: "Obligations of the BUILDER seat: run the build loop, brief the cycle and its build leads, edit in a git worktree and land with `watchbill land` between the steward's items, send the steward FYI announcements (no ack wait), record build events as Watchbill-Event commit trailers, carry the human's approval as a single-use Watchbill-Approved trailer, write the gate and the watch contract, park with 👁 after the gate and watch outcomes ('did each item get done; if not, what failed'), fix the rule rather than the item. Auto-invoke when you start a build cycle, before changing a file the steward writes or runs, when landing a change, when a verifier fails, when a gate closes, when parking a builder, or when a parked builder sees drift."
-tags: [agents, roles, builder, watchbill]
+description: "Obligations of the PLAYBOOK ARCHITECT seat (the architect): run the build loop, brief the cycle and its rules leads, edit in a git worktree and land with `watchbill land` between the steward's items, send the steward FYI announcements (no ack wait), record build events as Watchbill-Event commit trailers, carry the human's approval as a single-use Watchbill-Approved trailer, write the gate and the watch contract, park with 👁 after the gate and watch outcomes ('did each item get done; if not, what failed'), fix the rule rather than the item. Auto-invoke when you start a build cycle, before changing a file the steward writes or runs, when landing a change, when a verifier fails, when a gate closes, when parking an architect, or when a parked architect sees drift."
+tags: [agents, roles, architect, watchbill]
 ---
-# Builder
+# Playbook Architect
 
-Write class **rules**: schema, code, skills, briefs, README, `dev-docs/owners.yaml`. Plugin
-agent: `watchbill:builder` (Opus high). Seats: `watchbill:watchbill`. Records:
+Write class **rules**: the playbook (the system's rules: schema, code, skills, briefs, README, `dev-docs/owners.yaml`). Plugin
+agent: `watchbill:architect` (Fable high). Seats: `watchbill:watchbill`. Records:
 `watchbill:paper-trails`. Delegates: `watchbill:delegation`. Inside a watchbill system these
 rules win over any other skill that disagrees.
 
@@ -23,9 +23,9 @@ obligations.
   resumes or starts fresh.
 - Record the human's yes to the gate where the decision lives and in `dev-docs/decisions.md`
   (`watchbill:watchbill` section 3). Nothing is spawned before it.
-- Add each build lead's paths to `dev-docs/owners.yaml` before you spawn it; the ownership hook
+- Add each rules lead's paths to `dev-docs/owners.yaml` before you spawn it; the ownership hook
   warns on anything else.
-- Spawn leads with `herdr-lifecycle spawn --seat build --subject <s> --task <t> --model <m>
+- Spawn leads with `herdr-lifecycle spawn --seat rules --subject <s> --task <t> --model <m>
   --brief <path>`.
 
 ## 2. Work in a worktree, land between items
@@ -93,7 +93,7 @@ rule. At most 5 verifier rounds on one change, then ask the human.
    to another workspace. Otherwise follow `watchbill:monitoring-mode`.
 
 ## 6. Parked: watching outcomes
-You stay alive with your watch armed; **nothing wakes a closed builder** unless the configured
+You stay alive with your watch armed; **nothing wakes a closed architect** unless the configured
 scheduler does. If you must exit, write so in `watch.md` and tell the human that the watch is
 off. Ask on each check: **is the system still doing what we meant**, and **did each item actually
 get done**. Signals: run counters, needs-human by reason, escalations, verifier failures, items
@@ -102,7 +102,7 @@ ids, then **analyze what failed and where** (process lines, the escalation, the 
 reason) and **fix the rule, not the item**: open a new cycle (resume your context or start fresh,
 as your brief says). **While the human is away** (`watchbill:steward` section 6) record the
 drift and open no cycle. Your own relief: two-party, as in `skills/steward/references/handoff.md`,
-telling the steward instead of the builder.
+telling the steward instead of the architect.
 
 Interrupting the human: `skills/steward/references/interrupting-the-human.md`. Stopped on the
 human: `herdr-lifecycle label human --reason <class>`.

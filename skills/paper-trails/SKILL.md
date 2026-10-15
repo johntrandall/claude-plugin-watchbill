@@ -11,7 +11,7 @@ commit trailers; there is no separate change ledger. Inside a watchbill system t
 over any other skill that disagrees.
 
 ## The eight principles
-1. **The seat that holds the why writes it, when it holds it.** Builder: rules and their history.
+1. **The seat that holds the why writes it, when it holds it.** Architect: the playbook (the system's rules: schema, code, skills, briefs, README) and its history.
    Steward: item outcomes. Lead: its report. Crew: a report to its spawner, nothing else. The
    human's words are quoted with the date, never paraphrased, and live in fields only the human's
    decisions fill.
@@ -31,18 +31,18 @@ over any other skill that disagrees.
 ## Where things go (the short list)
 | What | Home | Writer |
 |---|---|---|
-| A rule changed | merge commit by `watchbill land` with the why, README in it, trailer `Watchbill-Event: landed` (`watchbill:builder` section 3) | builder |
-| Backfilled, verified, verify-failed, cycle closed | commit trailer `Watchbill-Event: <event>` with `Watchbill-Rule` or `Watchbill-Cycle`; the commit-msg hook checks it | builder or its crew |
-| An announcement | nothing: a message is FYI; the landed commit is the record | builder |
+| A rule changed | merge commit by `watchbill land` with the why, README in it, trailer `Watchbill-Event: landed` (`watchbill:architect` section 3) | architect |
+| Backfilled, verified, verify-failed, cycle closed | commit trailer `Watchbill-Event: <event>` with `Watchbill-Rule` or `Watchbill-Cycle`; the commit-msg hook checks it | architect or its crew |
+| An announcement | nothing: a message is FYI; the landed commit is the record | architect |
 | Adopting a new rules SHA | run manifest `adopted <sha>`, after the check passed | steward |
 | An item's state and outcome | the item record with `rules_sha` (`watchbill rules-sha`), one process line per change with its why | steward, through the tool |
 | A guess at an unclear rule | process line starting `ASSUMED:` | whoever guessed |
 | A run | run manifest: start, checkpoints, end with counters computed by the subject's tool, never typed; the end line carries `needs_human` (reason class to count), which `watchbill status` reads | steward |
 | An escalation | escalation log with reason, later its outcome | spawner |
-| A failed run, an abandoned approach | findings doc, written before the fix | builder |
-| A lasting decision | README with the human's words and the rejected alternative; a decision record if it crosses systems | builder |
+| A failed run, an abandoned approach | findings doc, written before the fix | architect |
+| A lasting decision | README with the human's words and the rejected alternative; a decision record if it crosses systems | architect |
 | A decision of the human | where its item lives (item record, Track Changes card, board card, commit), words verbatim with the date; plus one line in `dev-docs/decisions.md` | the seat that asked |
-| An approval spent | `Watchbill-Approved: <where recorded>` on the landing that used it; single-use | builder (`watchbill land --approved`) |
+| An approval spent | `Watchbill-Approved: <where recorded>` on the landing that used it; single-use | architect (`watchbill land --approved`) |
 | Work waiting on the human | an open entry in the decisions file, or a board card with unblock steps; tab `?` via `label human` | the seat that stopped |
 | A handoff and relief | brief committed in the project; `herdr-lifecycle handoff --brief` (origin), `relieve` (receiver), `relief-check` past the deadline; handoff-ledger rows carry `launched_by` and `accountable` | origin, then receiver |
 | A spawn | `herdr-lifecycle spawn --seat --brief` (handoff-ledger row with `launched_by`, `accountable`) | spawner |
