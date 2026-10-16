@@ -3,16 +3,23 @@
 Rules in the skills are stated as rules; this file keeps when each was decided and what it
 replaced.
 
+## 0.4.5 (2026-10-16)
+
+**`watchbill land` runs the system's gate on the merged result and undoes a red merge** (exit 4
+with the log path; `--no-gate` skips it, say why in `--message`). Two landings in two days went red
+with the gate left to the lander's discipline (1033c33, 7e6592a). The architect skill adds: only a
+seat of the system lands on it; another system's architect sends a REQUEST or asks the human to
+launch this one. Was: land merged and trusted the lander to have run the suites.
+
 ## 0.4.4 (2026-10-16)
 
 **A crew sub-agent is stopped when its report is filed** (the human, 2026-10-16: "verification is
 done and an agent has no questions. Can it close down those sub agents automatically?"): the
 spawner runs `TaskStop <name>` in the same turn; idle crew held the session's exit open and told
 the human nothing. Delegation §6, `crew.md`, architect §5.4. Landed by the ptouch system's
-architect at the human's request (7e6592a); its landing carried the human's name into a public
-skill and no CHANGELOG line, fixed forward here, and that is why **`watchbill land` now runs the
-system's gate (`tests/run-all.sh` when present) on the merged result and undoes a red merge**
-(`--no-gate` skips it; exit 4 with the log path).
+architect at the human's request (7e6592a); the landing carried the human's name into a public
+skill and no CHANGELOG line, fixed forward in 3337897 (the installed 0.4.4 label covers the red
+tree; 0.4.5 is the first install with the fix).
 
 ## 0.4.3 (2026-10-15)
 
