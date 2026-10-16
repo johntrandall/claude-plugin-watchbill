@@ -4,7 +4,8 @@
   watchbill status <system-dir> [--json]
       Who has the ball, the last run, the cycle state and which seats are alive. Read-only:
       it reads the README roster, `herdr-lifecycle siblings --all --json`, the run manifest
-      (named in the README, else the newest `*manifest*.jsonl` or `runs.jsonl` up to two
+      (named in the README as "Run manifest: `<path>`", else the newest `*manifest*.jsonl`,
+      `runs.jsonl` or `*manifest*.md` up to three
       folders down), recent commits with Watchbill-* trailers (landings and the approval
       each one names), the rules SHA, and the decisions for the human: the system's one
       decisions file (dev-docs/decisions.md; dev-docs/questions.md is the legacy name, then
@@ -233,22 +234,60 @@ def open_exposures(events):
     return open_
 
 
+def closed_cycles(d, events):
+    """Every cycle a cycle-closed commit names: the status window's events plus a git search past
+    it (a busy day pushes old events out of the last 60 commits); set() when not a git repo."""
+    closed = {tr["Watchbill-Cycle"][0] for _, _, _, tr in events
+              if "cycle-closed" in tr.get("Watchbill-Event", []) and tr.get("Watchbill-Cycle")}
+    try:
+        raw = git(d, "log", "--grep=^Watchbill-Event: cycle-closed", "--format=%x1e%(trailers:only,unfold)")
+    except Exception:
+        raw = ""
+    for rec in (raw or "").split("\x1e"):
+        for line in rec.splitlines():
+            k, _, v = line.partition(":")
+            if k.strip() == "Watchbill-Cycle" and v.strip():
+                closed.add(v.strip())
+    return closed
+
+
+def last_closed_cycle(d, events=()):
+    """The newest cycle-closed commit's Watchbill-Cycle: from the window's events, else a git
+    search past it; '' when none."""
+    for _, _, _, tr in events:
+        if "cycle-closed" in tr.get("Watchbill-Event", []) and tr.get("Watchbill-Cycle"):
+            return tr["Watchbill-Cycle"][0]
+    try:
+        raw = git(d, "log", "-n1", "--grep=^Watchbill-Event: cycle-closed", "--format=%(trailers:only,unfold)")
+    except Exception:
+        return ""
+    for line in (raw or "").splitlines():
+        k, _, v = line.partition(":")
+        if k.strip() == "Watchbill-Cycle":
+            return v.strip()
+    return ""
+
+
 def cycle_state(d, events):
-    closed = next((tr["Watchbill-Cycle"][0] for _, _, _, tr in events
-                   if "cycle-closed" in tr.get("Watchbill-Event", []) and tr.get("Watchbill-Cycle")), "")
+    """Open cycles are the dev-docs/runs/<cycle> folders with a cycle brief that no cycle-closed
+    event names; folder-name order plays no part (a cycle that sorts before a closed one used to
+    read as closed)."""
+    closed = closed_cycles(d, events)
     runs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(d, "dev-docs", "runs", "*")) if os.path.isdir(p))
-    newest = runs[-1] if runs else ""
-    if newest and newest != closed and (not closed or newest > closed):
-        has_brief = os.path.isfile(os.path.join(d, "dev-docs", "runs", newest, "briefs", "cycle.md"))
-        return f"cycle {newest} open" + (" (cycle brief written)" if has_brief else "") + \
-               (f"; last closed: {closed}" if closed else "; no cycle-closed event recorded yet")
-    if closed:
-        return f"no open cycle; last closed: {closed}"
+    open_ = [r for r in runs if r not in closed
+             and os.path.isfile(os.path.join(d, "dev-docs", "runs", r, "briefs", "cycle.md"))]
+    last = last_closed_cycle(d, events)
+    if open_:
+        return f"cycle {', '.join(open_)} open (cycle brief written)" + \
+               (f"; last closed: {last}" if last else "; no cycle-closed event recorded yet")
+    if last:
+        return f"no open cycle; last closed: {last}"
     return "no build cycles recorded"
 
 
 MANIFEST_GLOBS = ("*manifest*.jsonl", "runs.jsonl", "*/*manifest*.jsonl", "*/runs.jsonl",
-                  "*/*/*manifest*.jsonl", "*/*/runs.jsonl")  # e.g. searches/runs.jsonl
+                  "*/*/*manifest*.jsonl", "*/*/runs.jsonl", "*/*/*/*manifest*.jsonl", "*/*/*/runs.jsonl",
+                  "*/*/*manifest*.md", "*/*/*/*manifest*.md")  # e.g. searches/runs.jsonl, dev-docs/runs/steward/manifest.md
 
 
 def manifest_lines(d, text):
@@ -379,20 +418,24 @@ def resolve_marks(text, view):
 
 
 ANSWERED = re.compile(r"\*\*(Answer|Revised[^*]*|Done)[^*]*:|\{>>.*Done", re.IGNORECASE)
+# A decisions file written as bullets: "- **OPEN · title**" is open; DECIDED/ANSWERED/DONE/CLOSED answered.
+BULLET = re.compile(r"^\s*[-*+]\s+[^*\n]*?(?:\{(?:\w+=\"[^\"]*\"\s*)*~~\s*)?\*\*(OPEN|DECIDED|ANSWERED|DONE|CLOSED)\b\s*[·:–—-]?\s*(.*?)\*\*",
+                    re.IGNORECASE)  # a date or other prose may lead: "- 2026-10-15 **OPEN · title**"
 CARD = re.compile(r"^\s*(\d+)\.\s+\*\*(.+?)\*\*")
 CARD_START = re.compile(r"^\s*(?:\{(?:\w+=\"[^\"]*\"\s*)*~~\s*)?\d+\.\s+\*\*")  # a renumbering mark may lead
 
 
 def decision_cards(text):
-    """[(number, title, state)] for numbered bold-title cards; state is open, proposed (the only
-    answer is a pending suggestion), answered, or unknown (marks present, no parser)."""
+    """[(number, title, state)] for numbered bold-title cards (1. **Title?**) and status bullets
+    (- **OPEN · title**, numbered B1, B2 …); state is open, proposed (the only answer is a pending
+    suggestion), answered, or unknown (marks present, no parser)."""
     cards, cur = [], None
     for ln in text.splitlines():
-        if CARD_START.match(ln):
+        if CARD_START.match(ln) or BULLET.match(ln):
             cur = [ln]
             cards.append(cur)
-        elif cur is not None and (ln.startswith("   ") or ln.startswith("\t") or ln.startswith("{")
-                                  or not ln.strip()):
+        elif cur is not None and (ln.startswith("  ") or ln.startswith("\t") or ln.startswith("{")
+                                  or not ln.strip()):  # two spaces: a bullet's continuation
             cur.append(ln)
         elif ln.startswith("#"):
             cur = None
@@ -400,6 +443,17 @@ def decision_cards(text):
     for lines in cards:
         raw = "\n".join(lines)
         now = resolve_marks(raw, "current")
+        b = BULLET.match(now if now is not None else raw)
+        if b:
+            title = re.sub(r"[`*_]", "", b[2]).rstrip("?.").strip() or re.sub(r"[`*_]|\{[^}]*\}", "", (now or raw).splitlines()[0]).strip()[:120]
+            if now is None:
+                state = "unknown"
+            elif b[1].upper() != "OPEN" or ANSWERED.search(now):
+                state = "answered"
+            else:
+                state = "open"
+            out.append((f"B{len(out) + 1}", title, state))
+            continue
         m = CARD.match(now if now is not None else re.sub(r"^\s*\{[^~]*~~\s*", "", raw))
         if not m:
             continue

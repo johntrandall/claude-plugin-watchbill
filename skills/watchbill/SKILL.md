@@ -76,7 +76,10 @@ The **launcher of record** is the seat accountable for a delegate: records keep 
 - **Record each decision twice:** where its item lives (the item record, the Track Changes card,
   the board card, the commit) with the human's words verbatim and the date, and as one line in the
   system's decisions file `dev-docs/decisions.md`. `watchbill status` reads that file through the
-  Track Changes parser: text inside an unaccepted suggestion is still open.
+  Track Changes parser: text inside an unaccepted suggestion is still open. Two line shapes count:
+  a numbered card `1. **Title?**` (answered once it carries `**Answer:**` or `**Done**`), or a
+  bullet `- **OPEN · title**` (answered once it reads `- **DECIDED · …**`, `ANSWERED`, `DONE` or
+  `CLOSED`). Any other prose is not counted.
 - **An approval is single-use and bound to what the human saw:** one change, or one build cycle's
   gate, whose yes covers that cycle's landed changes and their routine applies until the cycle
   closes. A new or wider change needs new words. When an architect lands an approved change,

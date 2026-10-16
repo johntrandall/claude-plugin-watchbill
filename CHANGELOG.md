@@ -3,6 +3,16 @@
 Rules in the skills are stated as rules; this file keeps when each was decided and what it
 replaced.
 
+## 0.4.3 (2026-10-15)
+
+**`watchbill status` finds the cycle-closed event past its 60-commit window, manifests written as
+`.md` up to three folders deep (`dev-docs/runs/steward/manifest.md`), and decisions written as
+`- **OPEN · title**` bullets, and reports open cycles from the cycle-closed events rather than
+folder-name order** (reported by a sibling architect's cold verifier, 2026-10-15; was: a
+busy day made status report a closed cycle as open, "no run manifest found" beside an existing
+manifest, and "0 open" beside four open bullets). The watchbill skill now names the two decision
+line shapes that count.
+
 ## 0.4.2 (2026-10-15)
 
 **Shelves have a return trip, and monitoring has its own glyph** (the human, 2026-10-15: "when agents

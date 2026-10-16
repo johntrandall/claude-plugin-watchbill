@@ -1,6 +1,6 @@
 {
   "name": "watchbill",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "A role model for multi-agent work in herdr with a human in the loop: the Playbook Architect and the steward side by side, rules and run leads, pinned crew sub-types, a delegation layer for launching and closing delegates, an editor for collaborative drafting, two-party handoff with historians, paper-trail rules and the watcher contract. One seat changes the playbook, another runs the work, and every relief leaves a log.",
   "author": {
     "name": "John Randall",
