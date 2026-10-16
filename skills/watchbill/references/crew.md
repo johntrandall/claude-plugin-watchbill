@@ -28,8 +28,10 @@ tools, not the files.
 
 **Reports.** Crew report to whoever spawned them. The spawner files the report verbatim in the
 run or cycle folder; a report is not a trail until filed. **Then the spawner stops the crew
-member** (`TaskStop <name>`) in the same turn: a sub-agent that has reported is gone, not idle.
-An idle crew member holds the session's exit open and answers no question.
+member** (`TaskStop <name>`) in the same turn, unless it has a follow-up to send to that same
+agent (`watchbill:delegation` section 6): then the hold is written ("held: <name>, for <what>")
+and the stop comes when that exchange ends. A crew member left idle with nothing planned holds
+the session's exit open and answers no question.
 
 **An empty or missing report** is checked against the files the crew member was told to produce
 before it is called a failure.

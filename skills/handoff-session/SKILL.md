@@ -35,7 +35,10 @@ belongs to the receiver's closeout, which covers the whole chain.
 2. **Teammates and browsers:** shut your teammates down (choose "Exit and stop tasks", never
    "Move to background"); close the browser tabs you opened.
 3. **Into the briefing:** your open tasks, the URL of every shared card you claimed, your anchor
-   links if your setup keeps them, and the historians in this chain. Do not re-read the cards now;
+   links if your setup keeps them, the historians in this chain, and every open collaboration
+   (`herdr-lifecycle handoff` prints them as `open_collaborations`, each with its record and the
+   line to send that peer: your successor's name, and that it has not seen the exchange;
+   `watchbill:watchbill` section 2, its collaboration reference). Do not re-read the cards now;
    the receiver has the budget for that.
 4. If your setup keeps a session memory, write its summary now. Add one dated paragraph to the
    project README or log: what you did, what you learned, what is left.

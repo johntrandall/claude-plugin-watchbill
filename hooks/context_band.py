@@ -53,6 +53,15 @@ def main():
     sid, transcript = data.get("session_id") or "", data.get("transcript_path") or ""
     if not sid or not transcript or not in_scope(data.get("cwd") or os.getcwd(), data.get("agent_type") or ""):
         return 0
+    name = os.environ.get("WATCHBILL_SEAT_NAME", "")
+    if os.environ.get("WATCHBILL_SEAT") and name:
+        # A seat whose spawn was blocked at the folder-trust dialog clears its own mark at its first
+        # prompt: only a submitted prompt proves the dialog was answered (a session-start hook can
+        # run while the dialog is still up, seen 2026-10-16), and only then is the seat working.
+        try:
+            load("herdr_lifecycle", os.path.join(BIN, "herdr-lifecycle")).clear_blocked_start(sid, name)
+        except BaseException:  # labelling must never stop a prompt
+            pass
     wb = load("watchbill_tool", os.path.join(BIN, "watchbill"))
     tokens, _ = wb.context_tokens(transcript)
     code, verdict, pct = wb.context_verdict(tokens)

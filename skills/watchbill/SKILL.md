@@ -69,6 +69,10 @@ waits in the decisions file, never proceeds on a deadline.
 The **launcher of record** is the seat accountable for a delegate: records keep `launched_by`
 (fixed) and `accountable` (moves on handoff and promotion). Details: `watchbill:delegation`.
 
+**A session in another workspace you depend on** (another system's architect, a design session):
+record the thread with `herdr-lifecycle collab open` and in a file you keep, read its `watch.md`
+before you approach it, and release it when done. `references/collaboration.md`.
+
 ## 3. Decisions and approvals
 - **Channels.** A system's brief names the channels the human decides in, chosen from the
   configured `decision_channels` (chat, Track Changes notes, boards…). A decision given anywhere

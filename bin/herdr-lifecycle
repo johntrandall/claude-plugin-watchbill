@@ -33,6 +33,18 @@ Subcommands
   unshelve [--topic T]           back to the remembered home workspace (recreated when it
                                  is gone), active label. spawn runs it first when you are
                                  on a shelf: a session that spawns is working again.
+  collab open <peer> --for TEXT --record PATH|SHA [--outstanding TEXT] [--protocol PATH]
+  collab ping <peer> --question TEXT
+  collab release <peer> [--why done|human]
+  collab status [--json]
+                                 a collaboration across workspaces: you (the holder) need
+                                 <peer> (a Claude name or session id). One record per
+                                 direction, in the lifecycle ledger; release is the holder's
+                                 (or the holder's own closeout). `record` is where the
+                                 thread's state lives: after a handoff neither side alone
+                                 remembers it. status exit: 0 nobody holds you, 1 a live
+                                 holder has not released, 2 a holder is gone without
+                                 releasing (tell the human). exit refuses on 1 and 2.
   next-name [NAME]               the receiver name for a handoff from NAME (default: you)
   spawn <name> [--tab-label L] [--new-tab] [--cwd D] [--override-headroom] -- <claude args>
                                  split (or new tab), start claude with herdr name ==
@@ -421,6 +433,14 @@ def cmd_siblings(argv):
             note = f"handed off -> {r['to'] or '?'}"
         elif HO_RE.match(nm):
             note = "current owner (handoff receiver)"
+        held_by = [t["open"]["holder"].get("name") for t in collab_threads(events).values() if not t["release"]
+                   and is_on_side(events, t["open"]["held"], r["session_id"], nm)]
+        if held_by:
+            note = (note + "; " if note else "") + "held by " + ", ".join(sorted(set(held_by)))
+        holds_ = [t["open"]["held"].get("name") for t in collab_threads(events).values() if not t["release"]
+                  and is_on_side(events, t["open"]["holder"], r["session_id"], nm)]
+        if holds_:
+            note = (note + "; " if note else "") + "holds " + ", ".join(sorted(set(holds_)))
         if dup.get(nm, 0) > 1:
             note = (note + "; " if note else "") + (f"COLLIDES: {dup[nm]} live sessions answer to '{nm}' "
                                                     f"(fix: /rename <slug> in this pane)")
@@ -691,18 +711,56 @@ def cmd_spawn_seat(argv, claude_args):
            "resumed": resume, "brief": brief, "workspace_id": ws_id, "tab_id": tab_id, "pane_id": pane, "cwd": cwd, "at": now()}
     if blocked:
         row["startup"] = "blocked"
+        # The human must answer the dialog: say so on the tab, glyph first. The seat's own
+        # session-start hook clears it once the dialog is answered (clear_blocked_start).
+        try:
+            snap_b = snapshot()
+            t_b = next((t for t in snap_b["tabs"] if t["tab_id"] == tab_id), None)
+            if t_b:
+                relabel(snap_b, t_b, "human", reason="folder-trust")
+                label = compose("human", split_label(t_b["label"])[2], reason="folder-trust")
+        except SystemExit:
+            pass
     append_event(ledger_path(), stamp(row, launcher, accountable))
     out = {"name": name, "seat": seat, "pane_id": pane, "tab_id": tab_id, "tab_label": label,
            "slot_index": slot, "session_id": sid or "not registered yet",
            "launched_by": launcher, "accountable": accountable}
     if blocked:
         out["startup"] = "blocked: the session is up but not taking prompts (a folder-trust dialog, most often)"
-        out["next"] = (f"Nothing retries this spawn. Ask the human to answer the dialog in the tab {label!r}; "
-                       f"the session then registers itself as {name} (herdr-lifecycle siblings shows the address) "
-                       f"and reads its brief from its environment. Send it its launch prompt by SendMessage then.")
+        out["next"] = (f"Tell the human, in these words or close: \"The new tab {label!r} is waiting for you: "
+                       f"Claude Code is asking whether to trust the folder {cwd}. Answer it there.\" Nothing "
+                       f"retries this spawn. Once answered, the session registers as {name} (herdr-lifecycle "
+                       f"siblings shows the address); send it its launch prompt by SendMessage. Its first "
+                       f"prompt clears the (folder-trust) mark on its tab.")
         print(f"herdr-lifecycle: {name} started but is blocked at startup; see 'next' in the output",
               file=sys.stderr)
     print(json.dumps(out, ensure_ascii=False))
+
+
+def clear_blocked_start(sid, name):
+    """Called by the seat's prompt hook (context_band.py) at every prompt; acts once. A seat whose
+    spawn was blocked at startup (a folder-trust dialog) is past the dialog and working once a
+    prompt arrives: relabel its own tab active only if it still shows exactly the folder-trust
+    mark (a reason changed since, such as a decision, is left alone), and record `started`. The
+    spawn row is matched by the seat's name; the tab by this session id. Returns what it did, or ''."""
+    events = read_ledger(ledger_path())
+    spawn_row = None
+    for e in events:
+        if e.get("name") == name and e.get("event") == "spawn":
+            spawn_row = e
+        elif e.get("name") == name and e.get("event") == "started":
+            spawn_row = None
+    if not spawn_row or spawn_row.get("startup") != "blocked":
+        return ""
+    snap = snapshot()
+    a = next((a for a in snap["agents"] if (a.get("agent_session") or {}).get("value") == sid), None)
+    t = next((t for t in snap["tabs"] if a and t["tab_id"] == a["tab_id"]), None)
+    did = ""
+    if t and split_label(t["label"])[0] == "?" and label_reason(t["label"]) == "folder-trust":
+        did = relabel(snap, t, "active")
+    append_event(ledger_path(), {"event": "started", "schema_version": SCHEMA_VERSION, "session_id": sid,
+                                 "name": name, "after": "blocked", "relabelled": bool(did), "at": now()})
+    return did or "started recorded (label already changed)"
 
 
 def seat_env(seat, name, cwd, brief=""):
@@ -828,6 +886,15 @@ def cmd_handoff(argv):
         "relief": (f"pending: {me_name} owns the work until {receiver} runs `herdr-lifecycle relieve`; "
                    f"deadline {relief_minutes()} minutes (check with `herdr-lifecycle relief-check`)"
                    if scope == "session" else "task scope: no relief"),
+        "open_collaborations": [
+            {"thread": tid, "with": (t["open"]["held"] if is_on_side(events, t["open"]["holder"], sid, me_name or "")
+                                     else t["open"]["holder"]).get("name"), "for": t["open"].get("for"),
+             "record": t["open"].get("record"),
+             "tell_them": f"{me_name} is handing off to {receiver}, which has not seen our exchange; the thread's "
+                          f"state is in {t['open'].get('record')}."}
+            for tid, t in collab_threads(events).items() if not t["release"]
+            and (is_on_side(events, t["open"]["holder"], sid, me_name or "")
+                 or is_on_side(events, t["open"]["held"], sid, me_name or ""))],
         "announcement": (f"Handoff: \"{topic}\" is moving from {me_name} to {receiver}. {me_name} owns it "
                          f"until {receiver} runs relieve; then send work to {receiver}. {me_name} stays "
                          f"open as the historian: ask it about past decisions only."),
@@ -1071,6 +1138,12 @@ def cmd_park(argv):
     a, sid = me(snap)
     t = next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
     print(relabel(snap, t, "watching"))
+    events_p = read_ledger(ledger_path())
+    holds = [tt["open"] for tt in collab_threads(events_p).values() if not tt["release"]
+             and is_on_side(events_p, tt["open"]["holder"], sid, registry().get(sid, {}).get("name") or "")]
+    for o in holds:
+        print(f"you still hold {o['held'].get('name')} for: {o.get('for')} (record {o.get('record')}). A parked "
+              f"seat may stay alive for days: release it now if you no longer need it (collab release).")
     append_event(ledger_path(), {"event": "park", "schema_version": SCHEMA_VERSION, "session_id": sid,
                                  "name": registry().get(sid, {}).get("name") or "", "watch": watch, "at": now()})
 
@@ -1189,6 +1262,178 @@ def auto_unshelve():
     events = read_ledger(ledger_path())
     if sid and open_shelve(events, sid):
         print(do_unshelve(events, sid, why="spawn"))
+
+
+# --- Collaborations across workspaces (decided 2026-10-16; convention: the registry proposal) ----
+
+def chain_base(name):
+    m = HO_RE.match(name or "")
+    return m["base"] if m else (name or "")
+
+
+def resolve_peer(reg, peer):
+    """(sid, name) of a live session given a Claude name or a session id."""
+    live = live_registry(reg)
+    if peer in live:
+        return peer, live[peer].get("name") or ""
+    hits = [(s, r.get("name") or "") for s, r in live.items() if r.get("name") == peer]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        die(f"{len(hits)} live sessions answer to {peer!r}: pass the session id instead (herdr-lifecycle siblings --all)")
+    die(f"no live session {peer!r} (herdr-lifecycle siblings --all prints the addresses). A sub-agent is not a "
+        f"session and cannot be a peer: its spawner tracks it.")
+
+
+def peer_protocol(reg, peer_sid):
+    """The peer's own rules to read before approaching it: its system's dev-docs/watch.md, if any."""
+    cwd = (reg.get(peer_sid) or {}).get("cwd") or ""
+    for cand in (os.path.join(cwd, "dev-docs", "watch.md"), os.path.join(cwd, "README.md")) if cwd else ():
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def collab_threads(events):
+    """{thread id: {"open": row, "pings": [rows], "release": row or None}}."""
+    th = {}
+    for e in events:
+        ev, tid = e.get("event"), e.get("thread")
+        if ev == "collab-open":
+            th[tid] = {"open": e, "pings": [], "release": None}
+        elif ev == "collab-ping" and tid in th:
+            th[tid]["pings"].append(e)
+        elif ev == "collab-release" and tid in th:
+            th[tid]["release"] = e
+    return th
+
+
+def side_heads(events, side):
+    """The sessions holding one side of a thread now: its session at open, followed through the
+    handoff rows the ledger already has (no rows are copied at a handoff)."""
+    return chain_heads(events, side.get("sid") or "", side.get("name") or "", side.get("at") or "", set())
+
+
+def is_on_side(events, side, sid, name):
+    return any(_same(h_sid, h_name, sid, name) for h_sid, h_name, _ in side_heads(events, side))
+
+
+def holder_state(events, side, live_sids, live_names):
+    """'live', 'closed' (its own closeout releases what it held) or 'gone'."""
+    closed_ = [e for e in events if e.get("event") in ("closed", "historian-exited", "done-exited")]
+    states = []
+    for h_sid, h_name, since in side_heads(events, side):
+        if any(_same(e.get("session_id"), e.get("name"), h_sid, h_name) and e.get("at", "") >= since for e in closed_):
+            states.append("closed")
+        elif (h_sid in live_sids) if h_sid else (h_name in live_names):
+            states.append("live")
+        else:
+            states.append("gone")
+    return "live" if "live" in states else "gone" if "gone" in states else "closed"
+
+
+def collab_status(events, sid, name, live_sids, live_names):
+    """(code, inbound, outbound) for this session: inbound threads hold it, outbound it holds."""
+    inbound, outbound = [], []
+    for tid, t in collab_threads(events).items():
+        if t["release"]:
+            continue
+        o = t["open"]
+        if is_on_side(events, o["held"], sid, name):
+            inbound.append((tid, t, holder_state(events, o["holder"], live_sids, live_names)))
+        if is_on_side(events, o["holder"], sid, name):
+            outbound.append((tid, t))
+    states = [st for _, _, st in inbound]
+    code = 1 if "live" in states else 2 if "gone" in states else 0
+    return code, inbound, outbound
+
+
+def cmd_collab(argv):
+    usage = ("usage: collab open <peer> --for TEXT --record PATH|SHA [--outstanding TEXT] [--protocol PATH] | "
+             "collab ping <peer> --question TEXT | collab release <peer> [--why done|human] | collab status [--json]")
+    sub = argv[0] if argv else ""
+    reg, events = registry(), read_ledger(ledger_path())
+    sid = my_session_id() or die("cannot find this Claude session (no $CLAUDE_SESSION_ID)")
+    my_name = reg.get(sid, {}).get("name") or ""
+    if sub == "status":
+        live_sids, live_names = live_state(reg)
+        code, inbound, outbound = collab_status(events, sid, my_name, live_sids, live_names)
+        if "--json" in argv:
+            print(json.dumps({"code": code, "held_by": [
+                {"thread": tid, "holder": t["open"]["holder"].get("name"), "for": t["open"].get("for"),
+                 "record": t["open"].get("record"), "holder_state": st, "pings": len(t["pings"])}
+                for tid, t, st in inbound], "holds": [
+                {"thread": tid, "peer": t["open"]["held"].get("name"), "for": t["open"].get("for"),
+                 "record": t["open"].get("record")} for tid, t in outbound]}, indent=1, ensure_ascii=False))
+        else:
+            for tid, t, st in inbound:
+                o = t["open"]
+                print(f"held by {o['holder'].get('name')} ({st}): {o.get('for')}. Record: {o.get('record')}")
+            for tid, t in outbound:
+                o = t["open"]
+                print(f"holds {o['held'].get('name')}: {o.get('for')}. Record: {o.get('record')}")
+            if not inbound and not outbound:
+                print("no open collaborations")
+        sys.exit(code)
+    if sub not in ("open", "ping", "release") or len(argv) < 2:
+        die(usage)
+    peer_sid, peer_name = resolve_peer(reg, argv[1])
+    if peer_sid == sid:
+        die("a collaboration is between two sessions; this is you")
+    snap = snapshot()
+    ws_of = {(a.get("agent_session") or {}).get("value"): a.get("workspace_id") for a in snap.get("agents", [])}
+    if sub == "open":
+        def system_of(s_id, nm):
+            row = seat_row(events, s_id, nm)
+            return (row or {}).get("cwd") or ""
+        mine_sys, peer_sys = system_of(sid, my_name), system_of(peer_sid, peer_name)
+        if mine_sys and mine_sys == peer_sys:
+            die(f"{peer_name} is a seat of your own system ({mine_sys}): the roster and the launcher of record "
+                f"already tie you together; a collab is for a session in another workspace")
+        why = opt(argv, "--for") or die("open needs --for: one line, what you need from the peer")
+        record = opt(argv, "--record") or die("open needs --record: where the thread's state lives (a file or a commit)")
+        at = now()
+        tid = f"t-{int(time.time())}-{sid[:4]}{peer_sid[:4]}"
+        row = {"event": "collab-open", "schema_version": SCHEMA_VERSION, "thread": tid,
+               "holder": {"sid": sid, "name": my_name, "base": chain_base(my_name), "workspace": ws_of.get(sid, ""), "at": at},
+               "held": {"sid": peer_sid, "name": peer_name, "base": chain_base(peer_name),
+                        "workspace": ws_of.get(peer_sid, ""), "at": at},
+               "for": why, "record": record, "outstanding": opt(argv, "--outstanding", ""),
+               "protocol": opt(argv, "--protocol", "") or peer_protocol(reg, peer_sid), "at": at}
+        append_event(ledger_path(), row)
+        hint = ""
+        cur = [h for h in chains(rows(snap, reg, None)).get(chain_base(peer_name), [])]
+        if cur and cur[-1][1]["claude_name"] != peer_name:
+            hint = (f" Note: {peer_name} handed off; {cur[-1][1]['claude_name']} owns its work now and has not "
+                    f"seen your exchange: cite the record.")
+        print(json.dumps({"thread": tid, "holds": peer_name, "record": record,
+                          "read_first": row["protocol"] or "its system's dev-docs/watch.md or README",
+                          "send": (f"{my_name} is holding you for: {why}. The thread's state is in {record}. Your "
+                                   f"`herdr-lifecycle exit` will refuse until I release you (collab release) or close "
+                                   f"out; tell me if you need to go first."),
+                          "next": f"Send {peer_name} the 'send' line by SendMessage.{hint}"}, ensure_ascii=False))
+        return
+    mine = [(tid, t) for tid, t in collab_threads(events).items() if not t["release"]
+            and is_on_side(events, t["open"]["holder"], sid, my_name)
+            and is_on_side(events, t["open"]["held"], peer_sid, peer_name)]
+    if sub == "ping":
+        q = opt(argv, "--question") or die("ping needs --question: one line, what you are waiting for")
+        if not mine:
+            die(f"you hold no open thread with {peer_name}; `collab open` first")
+        for tid, _ in mine:
+            append_event(ledger_path(), {"event": "collab-ping", "schema_version": SCHEMA_VERSION, "thread": tid,
+                                         "from_sid": sid, "question": q, "at": now()})
+        print(f"recorded; now SendMessage {peer_name}: {q}")
+        return
+    why = opt(argv, "--why", "done")
+    if why not in ("done", "human"):
+        die("--why is done or human")
+    if not mine:
+        die(f"you hold no open thread with {peer_name}")
+    for tid, _ in mine:
+        append_event(ledger_path(), {"event": "collab-release", "schema_version": SCHEMA_VERSION, "thread": tid,
+                                     "why": why, "by_sid": sid, "at": now()})
+    print(f"released {len(mine)} thread(s) with {peer_name}; tell it by SendMessage that you no longer need it")
 
 
 # --- Handoff ledger (historian exit; design in historian-exit.md) ---------------------
@@ -1455,6 +1700,22 @@ def cmd_exit(argv):
     t = next(t for t in snap["tabs"] if t["tab_id"] == a["tab_id"])
     events = read_ledger(ledger_path())
     done = opt(argv, "--done")
+    if "--force" not in argv:
+        reg_x = registry()
+        c_code, c_in, _ = collab_status(events, sid, reg_x.get(sid, {}).get("name") or "", *live_state(reg_x))
+        live_holds = [(tid, th, st) for tid, th, st in c_in if st == "live"]
+        if live_holds:
+            who = ", ".join(f"{th['open']['holder'].get('name')} (record {th['open'].get('record')})" for _, th, _ in live_holds)
+            die(f"not eligible to exit: a live collaborator holds this session: {who}. Ask it to release you "
+                f"(herdr-lifecycle collab release) or say what remains; if it stays silent, label yourself "
+                f"`herdr-lifecycle label human --reason \"collaborator silent: <peer>\"` and ask the human. "
+                f"Pass --force only when the human said so.")
+        for tid, th, st in c_in:  # a holder that is not running cannot keep a session open for days
+            if "--dry-run" not in argv:
+                append_event(ledger_path(), {"event": "collab-release", "schema_version": SCHEMA_VERSION,
+                                             "thread": tid, "why": "holder-gone", "by_sid": sid, "at": now()})
+            print(f"herdr-lifecycle: held by {th['open']['holder'].get('name')}, which is not running; released "
+                  f"(holder-gone). Its record: {th['open'].get('record')}", file=sys.stderr)
     if "--force" in argv:
         why = "the human's word (--force)"
     elif done is not None:
@@ -1496,7 +1757,7 @@ CMDS = {"whoami": cmd_whoami, "siblings": cmd_siblings, "label": cmd_label,
         "next-name": cmd_next_name, "spawn": cmd_spawn, "handoff": cmd_handoff,
         "closed": cmd_closed, "historian-check": cmd_historian_check, "exit": cmd_exit,
         "relieve": cmd_relieve, "relief-check": cmd_relief_check, "promote": cmd_promote, "park": cmd_park,
-        "shelve": cmd_shelve, "unshelve": cmd_unshelve}
+        "shelve": cmd_shelve, "unshelve": cmd_unshelve, "collab": cmd_collab}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in CMDS:

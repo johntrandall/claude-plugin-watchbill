@@ -28,9 +28,16 @@ one hour so the cache stays warm. Which rung (sub-agent, fork, team, message, ha
 | Preset | Use in watchbill | Mechanism |
 |---|---|---|
 | Subagent | crew: one step, returns a report | Agent tool, `subagent_type: watchbill:<crew>` |
-| Teammate | a short paired helper you want to watch | pane beside you |
+| Teammate | a short paired helper you want to watch | in-process, inside your session (no pane: see below) |
 | Delegated session | a lead with its own task and crew | its own tab, `herdr-lifecycle spawn --seat` |
 | Independent session | work the human commands directly, or a promoted lead | its own tab |
+
+**Teammates have no pane of their own** (since 2026-10-16). Claude Code has no herdr backend: its
+teammates land in a pane only through a shim, and without one `teammateMode` falls to external tmux,
+where they run in private `tmux -L claude-swarm-*` servers that herdr cannot see and that never exit
+(150 to 400 MB each). With no shim installed, set `teammateMode` to `in-process` so a teammate stays
+inside the session that spawned it. A helper you want to watch in its own pane is a lead in its own
+tab (`herdr-lifecycle spawn`), not a teammate.
 
 Adjust a property (A context, B command, C result, D lifecycle, E acceptance, F retention,
 G isolation) only when the default does not fit; say which in the brief. A handoff is not a
@@ -73,12 +80,17 @@ conflict, follow the human and tell them about the conflict.
 - **A seat does not end with unfinished delegates.** It closes the leads it spawned for bounded
   tasks once their report is filed. Successors and historians end themselves (a historian of a
   standing chain once its successor has run `relieve`; `watchbill:historian`).
-- **A crew sub-agent is stopped by its spawner as soon as its report is filed**, in the same turn:
-  `TaskStop <its name>`. A verifier, reader or worker that has reported and has no question is
-  finished; left alive it sits idle, holds the session's `/exit` open ("background tasks are
-  running") and tells the human nothing. Idle notices from a stopped-but-not-yet-stopped crew
-  member are noise, never a reason to keep it. (The human, 2026-10-16: "verification is done and
-  an agent has no questions. Can it close down those sub agents automatically?")
+- **A crew sub-agent is stopped by its spawner once its report is filed and nothing more is
+  planned for it**, in the same turn: `TaskStop <its name>`. A verifier, reader or worker that has
+  reported and has no question is finished; left alive it sits idle, holds the session's `/exit`
+  open ("background tasks are running") and tells the human nothing. **The one reason to hold
+  it:** a follow-up you intend to send to that same agent (a second verifier round on the same
+  change, a question about a finding); a finished sub-agent keeps its context and a message to its
+  name resumes it, cheaper than a fresh spawn. Then write the hold in the run or cycle record
+  ("held: <name>, for <what>") and stop it when that exchange is done. Its idle notices decide
+  nothing either way. (The human, 2026-10-16: "verification is done and an agent has no
+  questions. Can it close down those sub agents automatically?", then "is 'never a reason to keep
+  it' too strong?": it was.)
 - Before closing: nothing uncommitted, no stale task records, no orphan processes.
 - Park (exit, record the resume handle) unless the delegate holds running state a resume cannot
   restore, or the human's acceptance is pending; then keep it running.

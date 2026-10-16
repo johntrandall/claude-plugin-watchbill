@@ -32,10 +32,17 @@ obligations.
 1. **Edit in your own worktree**, never in the primary checkout, where the steward runs:
    `git worktree add ../<repo>-<cycle> -b build/<cycle>`. Leads commit there (or in their own
    worktrees off that branch). The steward never sees half-edited rules.
-2. **Announce, as FYI**, before you land a change to anything the steward writes or runs: one
+2. **Ask the running architects first** (the human, 2026-10-16: "for each proposed change, you
+   should ask the currently running architects for feedback. That's how this system will work
+   better"). When the system's rules are used by other systems (a plugin, a shared tool), send each
+   live architect (`herdr-lifecycle siblings --all`: ARCHITECT tabs, not `↪`) one message: what
+   changes, why, the case that showed it, a question, and a reply window. Fold in what they say and
+   record it in the cycle folder. Silence is not agreement: it only means you land on the others'
+   answers. Their feedback never replaces the human's approval where one is needed.
+3. **Announce, as FYI**, before you land a change to anything the steward writes or runs: one
    message listing the files and why. It adds no work and you **do not wait for an ack**. If the
    steward is not live, the landed commit is the announcement: it reads the log when it starts.
-3. **Land with `watchbill land build/<cycle> --backfill owed|none --steward
+4. **Land with `watchbill land build/<cycle> --backfill owed|none --steward
    affected|unaffected|none [--approved <where>] [--fixes <sha>] [--cycle <id>]`.** It merges
    `--no-ff` in the primary checkout with the trailer block (section 3), refuses while the
    live steward is working on an item (`--wait <minutes>` waits for the gap), and **runs the
@@ -44,11 +51,11 @@ obligations.
    another system's architect sends a REQUEST or asks the human to launch this one. README in the
    same merge. Then message the steward the SHA (FYI). The steward adopts the new rules between items,
    after its check passes (`watchbill:steward` section 2); you never pause it.
-4. **Approval.** When the change needs the human's approval, pass `--approved <where recorded>`:
+5. **Approval.** When the change needs the human's approval, pass `--approved <where recorded>`:
    the decision line, the accepted Track Changes card, the board comment. It is **single-use**:
    `land` refuses an approval an earlier landing already spent, and a wider change needs new
    words from the human.
-5. **Backfill** through `watchbill:backfill` crew when it would add more than about 20K tokens to
+6. **Backfill** through `watchbill:backfill` crew when it would add more than about 20K tokens to
    your context; it commits with `Watchbill-Event: backfilled`. If it touched what the steward
    projects elsewhere (a calendar), send the steward a REQUEST for the apply whose first line is
    `APPROVED: <where the human's yes to this cycle's gate is recorded>`. The gate's yes is the
@@ -88,12 +95,15 @@ rule. At most 5 verifier rounds on one change, then ask the human.
    signal). FYI the steward; one message to the human with the gate table's path.
 2. **A system that does not record each item's outcome is not ready to park.** Fix that first.
 3. **No inbox means no steward:** close out instead of parking.
-4. Close the leads you spawned for bounded tasks, and confirm every crew sub-agent you spawned
-   is stopped (`TaskStop <name>`; it should have been, when its report was filed). Remove your
-   worktree.
-5. Write `dev-docs/watch.md`: what you watch, the exit condition, how it alerts the human (the
+4. Release every collaboration you hold (`herdr-lifecycle collab release <peer>`), and before you
+   close or park check that nobody holds you (`herdr-lifecycle collab status`;
+   `watchbill:watchbill` section 2, its collaboration reference).
+5. Close the leads you spawned for bounded tasks, and confirm every crew sub-agent you spawned
+   is stopped (`TaskStop <name>`; it should have been when its report was filed, unless a
+   recorded follow-up held it, and that is over now). Remove your worktree.
+6. Write `dev-docs/watch.md`: what you watch, the exit condition, how it alerts the human (the
    configured `alert_channels`), how often.
-6. **Park in the system's workspace** with `herdr-lifecycle park` (it refuses without
+7. **Park in the system's workspace** with `herdr-lifecycle park` (it refuses without
    `watch.md` and sets `👁`). This overrides any shelf rule that moves a monitoring-only session
    to another workspace. Otherwise follow `watchbill:monitoring-mode`.
 

@@ -3,6 +3,45 @@
 Rules in the skills are stated as rules; this file keeps when each was decided and what it
 replaced.
 
+## 0.4.6 (2026-10-16)
+
+**Collaborations across workspaces are recorded, and a held session cannot close** (the human,
+2026-10-16: "build that in", the convention drafted with two sibling sessions).
+`herdr-lifecycle collab open|ping|release|status`: one ledger thread per direction with a required
+`record` (where the thread's state lives); the holder's side follows the handoff rows, so a successor
+keeps holding; release is the holder's, or its own closeout; `exit` (plain or `--done`) refuses while
+a live holder has not released, and says to tell the human when a holder is gone; `handoff` prints
+the open threads with the line to send each peer; `siblings` notes "held by". Nothing pings on a
+timer; a holder that is no longer running does not trap the held session (its exit records the
+release as `holder-gone`); `park` lists the holds a parking seat still has; no hold between seats of
+one system or on a sub-agent. Shaped by four running architects before it landed. The convention is
+`skills/watchbill/references/collaboration.md`. Was: collaborations lived only
+in conversation, and three of the four ways a session loses its memory leave no trace.
+
+**The Teammate preset runs in-process** (herdmates removed from the human's machine, 2026-10-16):
+without a shim, Claude Code's teammates land in private tmux servers herdr cannot see; the
+delegation skill now says to use `teammateMode: in-process`, and a watched helper in its own pane is
+a lead in its own tab. Was: "pane beside you", which depended on the herdmates shim.
+
+**A blocked seat start is marked by `spawn` and cleared by the seat's first prompt.** `spawn --seat`
+labels a tab whose start hit the folder-trust dialog `? <SEAT> (folder-trust)` and its `next` line now
+tells the spawner what to say to the human; the seat's prompt hook clears exactly that mark at the
+first prompt it receives and records `started` in the ledger (a reason changed since stays). Was: the
+spawner set the mark by hand and nothing cleared it (36 minutes stale on 2026-10-16). Designed with
+the feedback of the three running architects: clear at the first prompt, not at session start (a
+session-start hook can fire while the dialog is up, and a seat is not working until its launch
+prompt); exact match on the mark; match by seat name and session id; resume-safe.
+
+**Architects ask the running architects before each change** (the human, 2026-10-16): architect
+skill section 2, step 2.
+
+**A finished crew member may be held for one planned follow-up** (the human, 2026-10-16 ~08:40: "is
+'never a reason to keep it' too strong?"; it was). Delegation §6, `crew.md` and architect §5.4 now
+say: stop it once its report is filed and nothing more is planned for it; hold it only for a
+follow-up to that same agent, write the hold in the run or cycle record, stop it when that exchange
+ends; its idle notices decide nothing either way. Was (0.4.4): stopped as soon as the report is
+filed, idle notices "never a reason to keep it".
+
 ## 0.4.5 (2026-10-16)
 
 **`watchbill land` runs the system's gate on the merged result and undoes a red merge** (exit 4

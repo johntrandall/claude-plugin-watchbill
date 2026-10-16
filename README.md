@@ -95,7 +95,7 @@ consent: an approval is a recorded decision, bound to one change and spent once.
 | `skills/` | `watchbill` (the map), `architect`, `steward`, `delegation`, `paper-trails`, `watchers`, `collaborative-drafting`, and the session skills (`handoff-session`, `historian`, `multi-agent-routing`, `monitoring-mode`, `herdr-workspace-placement`, `role-relaunch`, `infra-handoff`, `lead-and-crew`) |
 | `agents/` | one agent per seat and per crew sub-type, with model, effort and tools pinned (`--agent watchbill:architect`, `subagent_type: watchbill:reader`) |
 | `hooks/` | session context (configuration, overlay, the seat's primer), an ownership warning from `dev-docs/owners.yaml`, a model guard, a hold guard, a context-band notice, and a commit-msg check for `Watchbill-Event` trailers |
-| `bin/` | `herdr-lifecycle` (spawn seats, labels and glyphs, two-party handoff and relief, park, shelve and unshelve, exit), `watchbill` (`status`, `land`, `rules-sha`, `restore`, `config`, `context`, `check-note`, `hold`, `install-links`) |
+| `bin/` | `herdr-lifecycle` (spawn seats, labels and glyphs, two-party handoff and relief, park, shelve and unshelve, collab, exit), `watchbill` (`status`, `land`, `rules-sha`, `restore`, `config`, `context`, `check-note`, `hold`, `install-links`) |
 | `evals/` | cases for `claude plugin eval` |
 
 ## Install
