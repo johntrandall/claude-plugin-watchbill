@@ -37,9 +37,12 @@ obligations.
    steward is not live, the landed commit is the announcement: it reads the log when it starts.
 3. **Land with `watchbill land build/<cycle> --backfill owed|none --steward
    affected|unaffected|none [--approved <where>] [--fixes <sha>] [--cycle <id>]`.** It merges
-   `--no-ff` in the primary checkout with the trailer block (section 3), and refuses while the
-   live steward is working on an item (`--wait <minutes>` waits for the gap). README in the same
-   merge. Then message the steward the SHA (FYI). The steward adopts the new rules between items,
+   `--no-ff` in the primary checkout with the trailer block (section 3), refuses while the
+   live steward is working on an item (`--wait <minutes>` waits for the gap), and **runs the
+   system's gate** (`tests/run-all.sh` when present) on the merged result, undoing a red merge
+   (exit 4; `--no-gate` skips it, say why in `--message`). Only a seat of the system lands on it:
+   another system's architect sends a REQUEST or asks the human to launch this one. README in the
+   same merge. Then message the steward the SHA (FYI). The steward adopts the new rules between items,
    after its check passes (`watchbill:steward` section 2); you never pause it.
 4. **Approval.** When the change needs the human's approval, pass `--approved <where recorded>`:
    the decision line, the accepted Track Changes card, the board comment. It is **single-use**:
@@ -85,7 +88,9 @@ rule. At most 5 verifier rounds on one change, then ask the human.
    signal). FYI the steward; one message to the human with the gate table's path.
 2. **A system that does not record each item's outcome is not ready to park.** Fix that first.
 3. **No inbox means no steward:** close out instead of parking.
-4. Close the leads you spawned for bounded tasks. Remove your worktree.
+4. Close the leads you spawned for bounded tasks, and confirm every crew sub-agent you spawned
+   is stopped (`TaskStop <name>`; it should have been, when its report was filed). Remove your
+   worktree.
 5. Write `dev-docs/watch.md`: what you watch, the exit condition, how it alerts the human (the
    configured `alert_channels`), how often.
 6. **Park in the system's workspace** with `herdr-lifecycle park` (it refuses without

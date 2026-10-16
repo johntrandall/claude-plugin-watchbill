@@ -73,6 +73,12 @@ conflict, follow the human and tell them about the conflict.
 - **A seat does not end with unfinished delegates.** It closes the leads it spawned for bounded
   tasks once their report is filed. Successors and historians end themselves (a historian of a
   standing chain once its successor has run `relieve`; `watchbill:historian`).
+- **A crew sub-agent is stopped by its spawner as soon as its report is filed**, in the same turn:
+  `TaskStop <its name>`. A verifier, reader or worker that has reported and has no question is
+  finished; left alive it sits idle, holds the session's `/exit` open ("background tasks are
+  running") and tells the human nothing. Idle notices from a stopped-but-not-yet-stopped crew
+  member are noise, never a reason to keep it. (The human, 2026-10-16: "verification is done and
+  an agent has no questions. Can it close down those sub agents automatically?")
 - Before closing: nothing uncommitted, no stale task records, no orphan processes.
 - Park (exit, record the resume handle) unless the delegate holds running state a resume cannot
   restore, or the human's acceptance is pending; then keep it running.

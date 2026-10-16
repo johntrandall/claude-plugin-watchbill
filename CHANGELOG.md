@@ -3,6 +3,17 @@
 Rules in the skills are stated as rules; this file keeps when each was decided and what it
 replaced.
 
+## 0.4.4 (2026-10-16)
+
+**A crew sub-agent is stopped when its report is filed** (the human, 2026-10-16: "verification is
+done and an agent has no questions. Can it close down those sub agents automatically?"): the
+spawner runs `TaskStop <name>` in the same turn; idle crew held the session's exit open and told
+the human nothing. Delegation §6, `crew.md`, architect §5.4. Landed by the ptouch system's
+architect at the human's request (7e6592a); its landing carried the human's name into a public
+skill and no CHANGELOG line, fixed forward here, and that is why **`watchbill land` now runs the
+system's gate (`tests/run-all.sh` when present) on the merged result and undoes a red merge**
+(`--no-gate` skips it; exit 4 with the log path).
+
 ## 0.4.3 (2026-10-15)
 
 **`watchbill status` finds the cycle-closed event past its 60-commit window, manifests written as

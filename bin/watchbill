@@ -56,14 +56,16 @@
 
   watchbill land <branch> --backfill owed|none --steward affected|unaffected|none
                  [--approved WHERE] [--fixes SHA]... [--cycle ID] [--message TEXT]
-                 [--system DIR] [--wait MIN] [--dry-run]
+                 [--system DIR] [--wait MIN] [--no-gate] [--dry-run]
       The architect lands a build branch: merges it --no-ff into the branch checked out in the
       PRIMARY checkout (the steward's), with the trailers Watchbill-Event: landed,
       Watchbill-Backfill, Watchbill-Steward, and Watchbill-Fixes, Watchbill-Approved (where
       the human's approval is recorded; single-use: an approval an earlier landing named is
       refused) and Watchbill-Cycle when given. Refused (exit 3) while the live steward's tab
       shows working, that is mid-item; --wait polls up to MIN minutes. A steward that is not
-      live does not block: the landed commit is its message. A conflict aborts the merge.
+      live does not block: the landed commit is its message. A conflict aborts the merge. When
+      the system has an executable tests/run-all.sh, land runs it on the merged result and undoes
+      a red merge (exit 4, log path printed); --no-gate skips that.
 
   watchbill rules-sha [DIR] [--full] [--explain]
       The rules SHA to stamp on an item: the newest first-parent commit on HEAD that touched
@@ -1214,7 +1216,7 @@ def land_message(branch, backfill, steward, fixes=(), approved="", cycle="", bod
 
 LAND_USAGE = ("usage: watchbill land <branch> --backfill owed|none --steward affected|unaffected|none "
               "[--approved WHERE] [--fixes SHA]... [--cycle ID] [--message TEXT] [--system DIR] [--wait MIN] "
-              "[--dry-run]")
+              "[--no-gate] [--dry-run]")
 
 
 def cmd_land(argv):
@@ -1278,6 +1280,18 @@ def cmd_land(argv):
         die(f"merge failed, aborted, nothing landed:\n{(p.stdout + p.stderr).strip()[-1500:]}\n"
             f"Merge {target} into {branch} in your worktree, resolve, and land again.")
     sha = git(d, "rev-parse", "--short", "HEAD").strip()
+    gate = os.path.join(d, "tests", "run-all.sh")
+    if "--no-gate" not in argv and os.path.isfile(gate) and os.access(gate, os.X_OK):
+        # The system's own gate runs on the merged result; a red merge is undone, nothing landed.
+        # (1033c33 and 7e6592a landed red when the gate was left to the lander's discipline.)
+        log = os.path.join(tempfile.gettempdir(), f"watchbill-land-gate-{sha}.log")
+        with open(log, "w") as lf:
+            g = subprocess.run([gate], cwd=d, stdout=lf, stderr=subprocess.STDOUT)
+        if g.returncode != 0:
+            subprocess.run(["git", "-C", d, "reset", "--merge", "ORIG_HEAD"], capture_output=True)
+            die(f"gate failed (exit {g.returncode}): {os.path.relpath(gate, d)} on the merged tree; the merge was "
+                f"undone, nothing landed. Log: {log}. Fix in your worktree and land again; --no-gate skips the "
+                f"gate (then say why in --message).", 4)
     if "landed" not in git(d, "log", "-1", "--format=%(trailers:key=Watchbill-Event,valueonly)", "HEAD"):
         print(f"WARNING: {sha} was committed but git does not read its Watchbill trailers: a commit hook added a "
               f"paragraph after them. Install the watchbill commit-msg check (hooks/git/install-commit-msg.sh), "
